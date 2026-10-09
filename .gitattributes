@@ -1,0 +1,2 @@
+# Byte-exact: the published SHA-256 must match the file you get from a clone, a zip or a release asset.
+* -text
