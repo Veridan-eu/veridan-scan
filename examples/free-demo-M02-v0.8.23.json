@@ -1,0 +1,190 @@
+{
+  "schemaVersion": "0.3",
+  "collectorVersion": "0.8.23",
+  "mode": "Free",
+  "collectedAt": "2026-10-12T09:00:00.1186012Z",
+  "durationSeconds": 6.6,
+  "phaseTimings": {
+    "tenant": 0.3,
+    "users": 0.3,
+    "authMethods": 0.1,
+    "groups": 0.2,
+    "roles": 0.4,
+    "applications": 0.1,
+    "servicePrincipals": 1.2,
+    "permissionCatalog": 3.8,
+    "conditionalAccess": 0.0,
+    "policies": 0.1,
+    "devices": 0.0,
+    "deletedUsers": 0.0,
+    "logging": 0.0,
+    "workloads": 0.0
+  },
+  "warnings": [
+    {
+      "dataset": "roleEligibility",
+      "kind": "error",
+      "status": 400,
+      "code": "AadPremiumLicenseRequired"
+    }
+  ],
+  "aggregates": {
+    "tenant": {
+      "userCount": 27,
+      "securityDefaultsEnabled": false,
+      "licenceDataAvailable": true,
+      "licenceSkus": [
+        "SPB"
+      ],
+      "unassignedLicences": 13,
+      "overAssignedLicences": 0
+    },
+    "identity": {
+      "usersDataAvailable": true,
+      "usersTotal": 27,
+      "usersEnabled": 26,
+      "usersDisabled": 1,
+      "guests": 2,
+      "unlicensedEnabled": 3,
+      "signInDataAvailable": true,
+      "neverSignedIn": 2,
+      "inactiveByLastSignIn": 3,
+      "inactiveThresholdDays": 90,
+      "syncedFromOnPrem": 0,
+      "passwordNeverExpires": 0
+    },
+    "authentication": {
+      "registrationReportAvailable": true,
+      "registrationReportRows": 26,
+      "registrationReportCoverage": 1.0,
+      "registrationReportUsable": true,
+      "mfaRegistered": 20,
+      "mfaNotRegistered": 4,
+      "passwordlessCapable": 0,
+      "adminsTotal": 4,
+      "adminsWithoutMfa": 0,
+      "telephonyOnly": 2,
+      "adminsTelephonyOnly": 0,
+      "registeredButNotMfaCapable": 0,
+      "telephonyRetirement": "2027-02-01",
+      "methodsInUsePartial": false,
+      "methodsInUse": [
+        {
+          "method": "microsoftAuthenticatorPush",
+          "users": 18
+        },
+        {
+          "method": "mobilePhone",
+          "users": 2
+        },
+        {
+          "method": "softwareOneTimePasscode",
+          "users": 18
+        }
+      ]
+    },
+    "groups": {
+      "dataAvailable": true,
+      "membershipDataComplete": true,
+      "total": 7,
+      "empty": 2,
+      "withoutOwner": 2,
+      "nested": 0,
+      "dynamic": 0,
+      "roleAssignable": 0
+    },
+    "privilegedAccess": {
+      "assignmentDataAvailable": true,
+      "roleNamesAvailable": true,
+      "eligibilityDataAvailable": false,
+      "permanentAssignments": 5,
+      "eligibleAssignments": null,
+      "globalAdministrators": 4,
+      "groupBasedAssignments": 0,
+      "rolesInUse": [
+        {
+          "role": "Directory Readers",
+          "assignments": 1
+        },
+        {
+          "role": "Global Administrator",
+          "assignments": 4
+        }
+      ]
+    },
+    "applicationsAndAgents": {
+      "appDataAvailable": true,
+      "spDataAvailable": true,
+      "ownerDataComplete": true,
+      "registrations": 3,
+      "withoutOwner": 1,
+      "withExpiredCredential": 1,
+      "multiTenant": 0,
+      "servicePrincipalsTotal": 154,
+      "servicePrincipalsThirdParty": 2,
+      "thirdPartyWithoutOwner": 1,
+      "withAdminConsentForAll": 1,
+      "withUserConsentOnly": 3,
+      "looksLikeAgent": 4
+    },
+    "conditionalAccess": {
+      "dataAvailable": true,
+      "total": 5,
+      "enabled": 4,
+      "reportOnly": 1,
+      "disabled": 0,
+      "appliesToAllUsers": 3,
+      "requiresMfa": 3,
+      "requiresMfaMicrosoftManaged": 3,
+      "requiresMfaCustomerCreated": 0,
+      "microsoftManaged": 4,
+      "customerCreated": 1
+    },
+    "tenantDefaults": {
+      "dataAvailable": true,
+      "allowedToCreateApps": true,
+      "allowedToCreateSecurityGroups": true,
+      "allowedToReadOtherUsers": true,
+      "permissionGrantPoliciesAssigned": [
+        "ManagePermissionGrantsForSelf.microsoft-user-default-recommended",
+        "ManagePermissionGrantsForSelf.microsoft-user-default-allow-consent-apps",
+        "ManagePermissionGrantsForOwnedResource.microsoft-dynamically-managed-permissions-for-team",
+        "ManagePermissionGrantsForOwnedResource.microsoft-dynamically-managed-permissions-for-chat"
+      ],
+      "allowInvitesFrom": "everyone",
+      "allowedToUseSspr": true,
+      "blockMsolPowerShell": false,
+      "guestUserRoleId": "10dae51f-b6af-4016-8d66-8c2a99b929b3"
+    },
+    "devices": {
+      "dataAvailable": true,
+      "total": 15,
+      "managed": 15,
+      "compliant": 12,
+      "compliancePolicies": 2
+    },
+    "deletedUsers": {
+      "dataAvailable": true,
+      "inRecoveryWindow": 1
+    },
+    "logging": {
+      "signInLogsReadable": true,
+      "directoryAuditReadable": true,
+      "meldplicht": {
+        "licenceDataAvailable": true,
+        "retentionDaysInEntra": 30,
+        "retentionInferredFrom": "licence",
+        "premiumLicencePresent": true,
+        "alertingConfigured": null,
+        "alertingNote": "Not collected. Entra alerting state is not readable through the Graph endpoints this collector uses. Confirm by hand, or via the Azure module once written.",
+        "diagnosticExportConfigured": null,
+        "diagnosticExportNote": "Not visible to Graph. Requires the Azure module or manual confirmation.",
+        "reportingWindowHours": [
+          24,
+          72
+        ]
+      },
+      "note": "Diagnostic settings export to Log Analytics or storage is an Azure resource setting, collected by the Azure module, not by Graph."
+    }
+  }
+}
