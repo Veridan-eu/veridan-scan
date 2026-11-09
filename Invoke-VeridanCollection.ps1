@@ -1,6 +1,12 @@
 #Requires -Version 7.0
 <#
-    Invoke-VeridanCollection.ps1   v0.8.23
+    Invoke-VeridanCollection.ps1   v0.9.0
+
+    v0.9.0 - /verify: collectorCommit, a published build's provenance.
+      A release stamped by tools/release.ps1 carries collectorCommit (the 40-hex
+      commit it was built from) just after collectorVersion in the Free and Full
+      output; a source or dev build omits it (Get-CollectorCommit returns $null for
+      anything but 40 lower-case hex). No new Graph scope, no new identifier in Free.
 
     v0.8.23 - #52: THE HTTP STATUS IS SAID ONCE.
       Cosmetic, text only. The five call sites already write "(HTTP <n>)"

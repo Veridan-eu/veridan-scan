@@ -114,6 +114,25 @@ try {
     $x = Invoke-Release $l4.Work '0.9.0'
     Assert-That ($x.Code -eq 2 -and $x.Out -match 'REFUSED') 'refuse when HEAD is ahead of origin/main'
 
+    # --- remote tag points to a different commit than HEAD (Fable) ---
+    # HEAD == origin/main == B, local tag v0.9.0 == B, but origin's tag is force-moved to A.
+    # Every earlier check passes; only the remote-tag-SHA comparison must catch it.
+    $l5 = New-Lab; $labs += $l5.Root
+    Push-Location $l5.Work
+    try {
+        $shaA = ((Git-Do rev-parse HEAD) | Out-String).Trim()               # init commit, already on origin
+        Set-Content -LiteralPath 'more.txt' -Value 'y'
+        Git-Do add -A | Out-Null
+        Git-Do commit -q -m second | Out-Null
+        Git-Do push -q origin main | Out-Null                               # HEAD == origin/main == B
+        Git-Do tag v0.9.0 | Out-Null                                        # local tag at B (HEAD)
+        Git-Do push -q origin v0.9.0 | Out-Null                             # origin tag at B
+        Git-Do push -q --force origin "${shaA}:refs/tags/v0.9.0" | Out-Null # origin tag force-moved to A
+    } finally { Pop-Location }
+    $x = Invoke-Release $l5.Work '0.9.0'
+    Assert-That ($x.Code -eq 2 -and $x.Out -match 'REFUSED') 'refuse when origin tag points elsewhere'
+    Assert-That (-not (Test-Path -LiteralPath (Join-Path $l5.Work 'dist'))) 'no dist/ on refusal (remote tag SHA)'
+
     Write-Host 'Release.Tests.ps1: OK'
     exit 0
 }

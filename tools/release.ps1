@@ -18,22 +18,39 @@ $tag       = "v$Version"
 
 if (-not (Test-Path -LiteralPath $collector)) { Deny "collector not found at $collector" }
 
+# Run a read-only git command in the repo. stderr is discarded so a warning does not stop the
+# script with a bare exit 1 under ErrorActionPreference Stop; a non-zero exit becomes a REFUSED,
+# per the contract (Fable). Returns stdout as one string.
+function Invoke-Git {
+    $out = & git -C $repo @args 2>$null
+    if ($LASTEXITCODE -ne 0) { Deny "git $($args -join ' ') failed (exit $LASTEXITCODE)" }
+    ($out | Out-String)
+}
+
 # --- git state (read-only checks; dist/ is written only if all pass) ---
-$status = ((& git -C $repo status --porcelain) | Out-String).Trim()
+$status = (Invoke-Git status --porcelain).Trim()
 if ($status) { Deny 'the working tree has uncommitted changes' }
 
-& git -C $repo fetch -q origin 2>&1 | Out-Null
-$head = ((& git -C $repo rev-parse HEAD) | Out-String).Trim()
-$originMain = ((& git -C $repo rev-parse origin/main 2>$null) | Out-String).Trim()
-if (-not $originMain) { Deny 'origin/main not found' }
+Invoke-Git fetch -q origin | Out-Null
+$head = (Invoke-Git rev-parse HEAD).Trim()
+$originMain = (Invoke-Git rev-parse origin/main).Trim()
 if ($head -ne $originMain) { Deny "HEAD ($head) is not origin/main ($originMain)" }
 
-$localTag = ((& git -C $repo tag --list $tag) | Out-String).Trim()
+$localTag = (Invoke-Git tag --list $tag).Trim()
 if (-not $localTag) { Deny "tag $tag does not exist locally" }
-$tagCommit = ((& git -C $repo rev-list -n 1 $tag) | Out-String).Trim()
+$tagCommit = (Invoke-Git rev-list -n 1 $tag).Trim()
 if ($tagCommit -ne $head) { Deny "tag $tag does not point to HEAD" }
-$remoteTag = ((& git -C $repo ls-remote --tags origin $tag) | Out-String).Trim()
-if (-not $remoteTag) { Deny "tag $tag is not on origin" }
+
+# The tag on origin must exist AND point to HEAD, not merely exist (Fable). ls-remote prints
+# '<sha>\trefs/tags/<tag>' and, for an annotated tag, also '<commit>\trefs/tags/<tag>^{}';
+# the dereferenced line is the commit, so prefer it.
+$remoteLines = (Invoke-Git ls-remote --tags origin $tag) -split "`r?`n" | Where-Object { $_.Trim() }
+if (-not $remoteLines) { Deny "tag $tag is not on origin" }
+$deref = $remoteLines | Where-Object { $_ -match ([regex]::Escape("refs/tags/$tag") + '\^\{\}$') } | Select-Object -First 1
+$plain = $remoteLines | Where-Object { $_ -match ([regex]::Escape("refs/tags/$tag") + '$') }     | Select-Object -First 1
+$remoteRef = if ($deref) { $deref } else { $plain }
+$remoteSha = (($remoteRef -split '\s+')[0]).Trim()
+if ($remoteSha -ne $head) { Deny "tag $tag on origin points to $remoteSha, not HEAD ($head)" }
 
 # --- file checks (text view is only for matching; the bytes are what we write) ---
 $bytes = [System.IO.File]::ReadAllBytes($collector)
