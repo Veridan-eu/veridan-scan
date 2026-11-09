@@ -664,12 +664,24 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$COLLECTOR_VERSION = '0.8.23'
+$COLLECTOR_VERSION = '0.9.0'
 # D-001: this is the version of engine/schema/normalized.schema.json - the
 # engine's contract, the engine's numbering. It is NOT this collector's build
 # (that is $COLLECTOR_VERSION) and it does not move when the output shape
 # changes; a shape change goes to Vasil, who bumps the schema when he takes it.
 $SCHEMA_VERSION    = '0.3'   # version of engine/schema/normalized.schema.json, not ours
+
+# /verify (spec rev 3, section 5): the commit this build was released from. The source keeps
+# 'dev'; tools/release.ps1 stamps the 40-hex commit of the release tag into a dist/ copy and
+# nothing else. Get-CollectorCommit returns it only when it is a real commit (40 lowercase
+# hex), so a source run or a corrupted stamp emits no collectorCommit and the engine refuses
+# to issue a verify ID rather than trust an unknown provenance.
+$COLLECTOR_COMMIT = 'dev'
+function Get-CollectorCommit {
+    # -cmatch (case-sensitive): -match is case-insensitive, so [0-9a-f] would also accept
+    # upper-case hex; a git commit prints lower-case and the engine compares bytes.
+    if ($script:COLLECTOR_COMMIT -cmatch '^[0-9a-f]{40}$') { $script:COLLECTOR_COMMIT } else { $null }
+}
 
 # =========================================================== infrastructure
 
@@ -2600,6 +2612,10 @@ try {
                                   [ordered]@{ dataset = $_.dataset; kind = $_.kind; status = $_.status; code = $_.code } })
             aggregates       = (ConvertTo-FreeAggregate -D $datasets)
         }
+        # spec rev 3 section 5: collectorCommit just after collectorVersion (index 2), stamped
+        # releases only; a source/dev build (Get-CollectorCommit -> $null) emits no such field.
+        $cc = Get-CollectorCommit
+        if ($cc) { $payload.Insert(2, 'collectorCommit', $cc) }
         $file = Join-Path $OutputPath "veridan-scan-$stamp.json"
     }
     else {
@@ -2616,6 +2632,10 @@ try {
             datasets         = $datasets
             aggregates       = (ConvertTo-FreeAggregate -D $datasets)   # same numbers, for cross-checking
         }
+        # spec rev 3 section 5: collectorCommit just after collectorVersion (index 2), stamped
+        # releases only; a source/dev build (Get-CollectorCommit -> $null) emits no such field.
+        $cc = Get-CollectorCommit
+        if ($cc) { $payload.Insert(2, 'collectorCommit', $cc) }
         if ($Anonymise) {
             $payload = ConvertTo-AnonymisedCollection -Data $payload
             Write-Item 'identifiers hashed (note: hashed records are still personal data)'
