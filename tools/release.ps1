@@ -18,10 +18,12 @@ $tag       = "v$Version"
 
 if (-not (Test-Path -LiteralPath $collector)) { Deny "collector not found at $collector" }
 
-# Run a read-only git command in the repo. stderr is discarded so a warning does not stop the
-# script with a bare exit 1 under ErrorActionPreference Stop; a non-zero exit becomes a REFUSED,
-# per the contract (Fable). Returns stdout as one string.
+# Run a read-only git command in the repo. stderr is discarded and ErrorActionPreference is
+# Continue inside this function (function-scoped, so the caller keeps Stop) so a git warning on
+# stderr cannot stop the script with a bare exit 1 under Windows PowerShell 5.1; a non-zero exit
+# becomes a REFUSED, per the contract. Returns stdout as one string.
 function Invoke-Git {
+    $ErrorActionPreference = 'Continue'
     $out = & git -C $repo @args 2>$null
     if ($LASTEXITCODE -ne 0) { Deny "git $($args -join ' ') failed (exit $LASTEXITCODE)" }
     ($out | Out-String)
@@ -41,14 +43,17 @@ if (-not $localTag) { Deny "tag $tag does not exist locally" }
 $tagCommit = (Invoke-Git rev-list -n 1 $tag).Trim()
 if ($tagCommit -ne $head) { Deny "tag $tag does not point to HEAD" }
 
-# The tag on origin must exist AND point to HEAD, not merely exist (Fable). ls-remote prints
-# '<sha>\trefs/tags/<tag>' and, for an annotated tag, also '<commit>\trefs/tags/<tag>^{}';
-# the dereferenced line is the commit, so prefer it.
-$remoteLines = (Invoke-Git ls-remote --tags origin $tag) -split "`r?`n" | Where-Object { $_.Trim() }
+# The tag on origin must exist AND point to HEAD, not merely exist. Query both the tag ref and
+# its peeled form: 'ls-remote --tags origin <tag>' with a pattern returns only '<sha>\trefs/tags/<tag>'
+# (for an annotated tag that is the tag object, not the commit), so the peeled commit line
+# '<commit>\trefs/tags/<tag>^{}' must be requested explicitly. The dereferenced line is the
+# commit, so prefer it; a lightweight tag has no peeled line and its plain line is the commit.
+$remoteLines = (Invoke-Git ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}") -split "`r?`n" | Where-Object { $_.Trim() }
 if (-not $remoteLines) { Deny "tag $tag is not on origin" }
 $deref = $remoteLines | Where-Object { $_ -match ([regex]::Escape("refs/tags/$tag") + '\^\{\}$') } | Select-Object -First 1
 $plain = $remoteLines | Where-Object { $_ -match ([regex]::Escape("refs/tags/$tag") + '$') }     | Select-Object -First 1
 $remoteRef = if ($deref) { $deref } else { $plain }
+if (-not $remoteRef) { Deny "cannot parse origin ref for tag $tag from ls-remote output" }
 $remoteSha = (($remoteRef -split '\s+')[0]).Trim()
 if ($remoteSha -ne $head) { Deny "tag $tag on origin points to $remoteSha, not HEAD ($head)" }
 

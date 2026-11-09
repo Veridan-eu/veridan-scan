@@ -114,7 +114,7 @@ try {
     $x = Invoke-Release $l4.Work '0.9.0'
     Assert-That ($x.Code -eq 2 -and $x.Out -match 'REFUSED') 'refuse when HEAD is ahead of origin/main'
 
-    # --- remote tag points to a different commit than HEAD (Fable) ---
+    # --- remote tag points to a different commit than HEAD ---
     # HEAD == origin/main == B, local tag v0.9.0 == B, but origin's tag is force-moved to A.
     # Every earlier check passes; only the remote-tag-SHA comparison must catch it.
     $l5 = New-Lab; $labs += $l5.Root
@@ -130,8 +130,27 @@ try {
         Git-Do push -q --force origin "${shaA}:refs/tags/v0.9.0" | Out-Null # origin tag force-moved to A
     } finally { Pop-Location }
     $x = Invoke-Release $l5.Work '0.9.0'
-    Assert-That ($x.Code -eq 2 -and $x.Out -match 'REFUSED') 'refuse when origin tag points elsewhere'
+    Assert-That ($x.Code -eq 2 -and $x.Out -match 'on origin points to') 'refuse when origin tag points elsewhere'
     Assert-That (-not (Test-Path -LiteralPath (Join-Path $l5.Work 'dist'))) 'no dist/ on refusal (remote tag SHA)'
+
+    # --- git command fails with a non-zero exit: Invoke-Git must REFUSE, not throw a bare exit 1.
+    # Under Windows PowerShell 5.1 with ErrorActionPreference Stop, native-command stderr can
+    # surface as a terminating error; removing origin makes 'git fetch origin' fail (exit != 0),
+    # which must become a REFUSED + exit 2 with no dist/.
+    $l6 = New-Lab; $labs += $l6.Root; Add-Tag $l6.Work 'v0.9.0'
+    Push-Location $l6.Work
+    try { Git-Do remote remove origin | Out-Null } finally { Pop-Location }
+    $x = Invoke-Release $l6.Work '0.9.0'
+    Assert-That ($x.Code -eq 2 -and $x.Out -match 'REFUSED' -and $x.Out -match 'failed \(exit') 'git non-zero exit becomes REFUSED'
+    Assert-That (-not (Test-Path -LiteralPath (Join-Path $l6.Work 'dist'))) 'no dist/ on refusal (git exit)'
+
+    # --- annotated tag success: exercises the ls-remote '^{}' dereference branch in release.ps1.
+    $l7 = New-Lab; $labs += $l7.Root
+    Push-Location $l7.Work
+    try { Git-Do tag -a v0.9.0 -m 'release 0.9.0' | Out-Null; Git-Do push -q origin v0.9.0 | Out-Null } finally { Pop-Location }
+    $r7 = Invoke-Release $l7.Work '0.9.0'
+    Assert-That ($r7.Code -eq 0) "annotated-tag success exits 0 (got $($r7.Code): $($r7.Out))"
+    Assert-That (Test-Path -LiteralPath (Join-Path $l7.Work 'dist\Invoke-VeridanCollection.ps1')) 'dist written for annotated tag'
 
     Write-Host 'Release.Tests.ps1: OK'
     exit 0
