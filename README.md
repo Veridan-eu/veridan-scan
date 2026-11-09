@@ -29,8 +29,11 @@ A read-only PowerShell script that reads the configuration of a Microsoft 365 te
 ### Run
 
 ```powershell
-# 1. Check that the script is unchanged: compare with the SHA-256 in the release notes
-Get-FileHash .\Invoke-VeridanCollection.ps1 -Algorithm SHA256
+# 1. Get Invoke-VeridanCollection.ps1 from the latest GitHub release (not from the source here)
+#    and check it is unchanged: its SHA-256 must equal the line in the release's SHA256SUMS,
+#    which is also shown in the release notes. -eq is case-insensitive, so the lower-case
+#    SHA256SUMS hash compares cleanly.
+(Get-FileHash .\Invoke-VeridanCollection.ps1 -Algorithm SHA256).Hash -eq '<hash from SHA256SUMS>'
 
 # 2. The script is not code-signed yet; after the check, unblock it
 Unblock-File .\Invoke-VeridanCollection.ps1
@@ -80,8 +83,11 @@ Een PowerShell-script dat alleen leest: het leest de configuratie van een Micros
 ### Uitvoeren
 
 ```powershell
-# 1. Controleer of het script ongewijzigd is: vergelijk met de SHA-256 in de release notes
-Get-FileHash .\Invoke-VeridanCollection.ps1 -Algorithm SHA256
+# 1. Haal Invoke-VeridanCollection.ps1 uit de nieuwste GitHub-release (niet uit de broncode hier)
+#    en controleer of het ongewijzigd is: de SHA-256 moet gelijk zijn aan de regel in SHA256SUMS
+#    van de release, die ook in de release notes staat. -eq is hoofdletterongevoelig, dus de
+#    kleineletter-hash uit SHA256SUMS vergelijkt netjes.
+(Get-FileHash .\Invoke-VeridanCollection.ps1 -Algorithm SHA256).Hash -eq '<hash uit SHA256SUMS>'
 
 # 2. Het script is nog niet ondertekend met een codecertificaat; deblokkeer het na de controle
 Unblock-File .\Invoke-VeridanCollection.ps1
