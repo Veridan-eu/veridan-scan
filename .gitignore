@@ -1,0 +1,2 @@
+# Build output of tools/release.ps1 (a person publishes it; it is never committed).
+dist/
