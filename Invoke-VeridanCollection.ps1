@@ -686,7 +686,7 @@ $COLLECTOR_COMMIT = 'dev'
 function Get-CollectorCommit {
     # -cmatch (case-sensitive): -match is case-insensitive, so [0-9a-f] would also accept
     # upper-case hex; a git commit prints lower-case and the engine compares bytes.
-    if ($script:COLLECTOR_COMMIT -cmatch '^[0-9a-f]{40}$') { $script:COLLECTOR_COMMIT } else { $null }
+    if ($script:COLLECTOR_COMMIT -cmatch '^[0-9a-f]{40}\z') { $script:COLLECTOR_COMMIT } else { $null }
 }
 
 # =========================================================== infrastructure

@@ -106,13 +106,15 @@ try {
 
     $l3 = New-Lab; $labs += $l3.Root; Add-Tag $l3.Work 'v0.9.1'   # file is 0.9.0
     $x = Invoke-Release $l3.Work '0.9.1'
-    Assert-That ($x.Code -eq 2 -and $x.Out -match 'REFUSED') 'refuse on version mismatch'
+    Assert-That ($x.Code -eq 2 -and $x.Out -match 'COLLECTOR_VERSION is') 'refuse on version mismatch'
+    Assert-That (-not (Test-Path -LiteralPath (Join-Path $l3.Work 'dist'))) 'no dist/ on refusal (version mismatch)'
 
     $l4 = New-Lab; $labs += $l4.Root; Add-Tag $l4.Work 'v0.9.0'   # commit after tag/push
     Push-Location $l4.Work
     try { Set-Content -LiteralPath 'extra.txt' -Value 'x'; Git-Do add -A | Out-Null; Git-Do commit -q -m more | Out-Null } finally { Pop-Location }
     $x = Invoke-Release $l4.Work '0.9.0'
-    Assert-That ($x.Code -eq 2 -and $x.Out -match 'REFUSED') 'refuse when HEAD is ahead of origin/main'
+    Assert-That ($x.Code -eq 2 -and $x.Out -match 'is not origin/main') 'refuse when HEAD is ahead of origin/main'
+    Assert-That (-not (Test-Path -LiteralPath (Join-Path $l4.Work 'dist'))) 'no dist/ on refusal (HEAD ahead)'
 
     # --- remote tag points to a different commit than HEAD ---
     # HEAD == origin/main == B, local tag v0.9.0 == B, but origin's tag is force-moved to A.
@@ -179,6 +181,47 @@ try {
     $x = Invoke-Release $l9.Work '0.9.0'
     Assert-That ($x.Code -eq 2 -and $x.Out -match 'on origin points to') 'refuse when origin annotated tag points to wrong commit'
     Assert-That (-not (Test-Path -LiteralPath (Join-Path $l9.Work 'dist'))) 'no dist/ on refusal (annotated wrong commit)'
+
+    # --- local annotated tag points to a commit other than HEAD: REFUSE 'does not point to HEAD'.
+    # HEAD == origin/main == B, so the origin/main check passes; the local-tag-resolves-to-HEAD
+    # check is what must catch an annotated tag made at an earlier commit.
+    $l10 = New-Lab; $labs += $l10.Root
+    Push-Location $l10.Work
+    try {
+        $aSha = ((Git-Do rev-parse HEAD) | Out-String).Trim()          # A (init)
+        Set-Content -LiteralPath 'd.txt' -Value 'w'
+        Git-Do add -A | Out-Null
+        Git-Do commit -q -m fourth | Out-Null
+        Git-Do push -q origin main | Out-Null                          # HEAD == origin/main == B
+        Git-Do tag -a v0.9.0 -m rel $aSha | Out-Null                   # local annotated tag -> A, not HEAD
+    } finally { Pop-Location }
+    $x = Invoke-Release $l10.Work '0.9.0'
+    Assert-That ($x.Code -eq 2 -and $x.Out -match 'does not point to HEAD') 'refuse when local tag is not at HEAD'
+    Assert-That (-not (Test-Path -LiteralPath (Join-Path $l10.Work 'dist'))) 'no dist/ on refusal (local tag not HEAD)'
+
+    # --- $COLLECTOR_COMMIT = 'dev' must occur exactly once. Doctor the committed collector so the
+    # needle appears 0x / 2x (committed, so the tree is clean and the hash guard still matches), and
+    # confirm the dev-count check refuses before any byte splice.
+    foreach ($case in @(@{ n = 0; repl = "`$COLLECTOR_COMMIT = ''" },
+                        @{ n = 2; repl = "`$COLLECTOR_COMMIT = 'dev'`n`$COLLECTOR_COMMIT = 'dev'" })) {
+        $lab = New-Lab; $labs += $lab.Root
+        Push-Location $lab.Work
+        try {
+            $c  = Join-Path $lab.Work 'Invoke-VeridanCollection.ps1'
+            $t  = [System.IO.File]::ReadAllText($c, [System.Text.Encoding]::UTF8)
+            $t2 = $t.Replace("`$COLLECTOR_COMMIT = 'dev'", $case.repl)
+            Assert-That ($t2 -ne $t) "setup: dev needle rewritten ($($case.n)x)"
+            [System.IO.File]::WriteAllText($c, $t2, (New-Object System.Text.UTF8Encoding $false))
+            Git-Do add -A | Out-Null
+            Git-Do commit -q -m "dev needle $($case.n)x" | Out-Null
+            Git-Do push -q origin main | Out-Null
+            Git-Do tag v0.9.0 | Out-Null
+            Git-Do push -q origin v0.9.0 | Out-Null
+        } finally { Pop-Location }
+        $x = Invoke-Release $lab.Work '0.9.0'
+        Assert-That ($x.Code -eq 2 -and $x.Out -match "occurs $($case.n) time") "refuse when dev needle occurs $($case.n)x"
+        Assert-That (-not (Test-Path -LiteralPath (Join-Path $lab.Work 'dist'))) "no dist/ on refusal (dev $($case.n)x)"
+    }
 
     Write-Host 'Release.Tests.ps1: OK'
     exit 0

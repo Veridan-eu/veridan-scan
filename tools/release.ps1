@@ -2,7 +2,7 @@
 # Publishing is a person's step: this script PRINTS the gh command, it never runs it.
 # Spec rev 3, section 12 step 2. No new Graph scopes, nothing against a tenant.
 [CmdletBinding()]
-param([Parameter(Mandatory = $true)][string] $Version)
+param([Parameter(Mandatory = $true)][ValidatePattern('^\d+\.\d+\.\d+$')][string] $Version)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -47,16 +47,29 @@ if ($tagCommit -ne $head) { Deny "tag $tag does not point to HEAD" }
 # The tag on origin must exist AND point to HEAD, not merely exist. Query both the tag ref and
 # its peeled form: 'ls-remote --tags origin <tag>' with a pattern returns only '<sha>\trefs/tags/<tag>'
 # (for an annotated tag that is the tag object, not the commit), so the peeled commit line
-# '<commit>\trefs/tags/<tag>^{}' must be requested explicitly. The dereferenced line is the
-# commit, so prefer it; a lightweight tag has no peeled line and its plain line is the commit.
+# '<commit>\trefs/tags/<tag>^{}' must be requested explicitly. ls-remote matches on the ref tail,
+# so a stray ref like refs/heads/refs/tags/<tag> can also come back; compare each line's ref field
+# EXACTLY (not by suffix). Prefer the peeled '^{}' line (the commit an annotated tag points to);
+# a lightweight tag has no peeled line and its plain line is the commit.
 $remoteLines = (Invoke-Git ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}") -split "`r?`n" | Where-Object { $_.Trim() }
-if (-not $remoteLines) { Deny "tag $tag is not on origin" }
-$deref = $remoteLines | Where-Object { $_ -match ('\t' + [regex]::Escape("refs/tags/$tag") + '\^\{\}$') } | Select-Object -First 1
-$plain = $remoteLines | Where-Object { $_ -match ('\t' + [regex]::Escape("refs/tags/$tag") + '$') }       | Select-Object -First 1
-$remoteRef = if ($deref) { $deref } else { $plain }
-if (-not $remoteRef) { Deny "cannot parse origin ref for tag $tag from ls-remote output" }
-$remoteSha = (($remoteRef -split '\s+')[0]).Trim()
+$plainSha = $null
+$peelSha  = $null
+foreach ($line in $remoteLines) {
+    $sha, $ref = $line -split "`t", 2
+    if     ($ref -ceq "refs/tags/$tag^{}") { $peelSha  = $sha.Trim() }
+    elseif ($ref -ceq "refs/tags/$tag")    { $plainSha = $sha.Trim() }
+}
+$remoteSha = if ($peelSha) { $peelSha } else { $plainSha }
+if (-not $remoteSha) { Deny "tag $tag is not on origin" }
 if ($remoteSha -ne $head) { Deny "tag $tag on origin points to $remoteSha, not HEAD ($head)" }
+
+# The byte splice below assumes the working-tree bytes equal the committed blob (the repo's
+# .gitattributes '* -text' guarantees it, so core.autocrlf does not rewrite anything). Verify it,
+# so a local .git/info/attributes or a smudge filter that rewrote the bytes becomes a REFUSED
+# rather than a silently re-encoded release.
+$wtHash   = (Invoke-Git hash-object --no-filters $collector).Trim()
+$blobHash = (Invoke-Git rev-parse "HEAD:Invoke-VeridanCollection.ps1").Trim()
+if ($wtHash -ne $blobHash) { Deny 'the working-tree collector differs from its committed blob (check .gitattributes / smudge filters)' }
 
 # --- file checks (text view is only for matching; the bytes are what we write) ---
 $bytes = [System.IO.File]::ReadAllBytes($collector)
