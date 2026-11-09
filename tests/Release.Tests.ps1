@@ -152,6 +152,34 @@ try {
     Assert-That ($r7.Code -eq 0) "annotated-tag success exits 0 (got $($r7.Code): $($r7.Out))"
     Assert-That (Test-Path -LiteralPath (Join-Path $l7.Work 'dist\Invoke-VeridanCollection.ps1')) 'dist written for annotated tag'
 
+    # --- tag exists locally (at HEAD) but was never pushed: must REFUSE 'is not on origin'. ---
+    $l8 = New-Lab; $labs += $l8.Root
+    Push-Location $l8.Work
+    try { Git-Do tag v0.9.0 | Out-Null } finally { Pop-Location }   # local tag at HEAD, no push
+    $x = Invoke-Release $l8.Work '0.9.0'
+    Assert-That ($x.Code -eq 2 -and $x.Out -match 'is not on origin') 'refuse when tag is only local'
+    Assert-That (-not (Test-Path -LiteralPath (Join-Path $l8.Work 'dist'))) 'no dist/ on refusal (tag not on origin)'
+
+    # --- annotated tag whose origin copy points to the wrong commit: must REFUSE 'on origin points to'.
+    # Local annotated tag is at HEAD (passes the local check); origin's annotated tag is at an earlier
+    # commit, so only the remote-SHA comparison (via the peeled ^{} line) can catch it.
+    $l9 = New-Lab; $labs += $l9.Root
+    Push-Location $l9.Work
+    try {
+        $aSha = ((Git-Do rev-parse HEAD) | Out-String).Trim()          # A (init), already on origin
+        Set-Content -LiteralPath 'c.txt' -Value 'z'
+        Git-Do add -A | Out-Null
+        Git-Do commit -q -m third | Out-Null
+        Git-Do push -q origin main | Out-Null                          # HEAD == origin/main == B
+        Git-Do tag -a v0.9.0 -m rel $aSha | Out-Null                   # annotated tag -> A
+        Git-Do push -q origin v0.9.0 | Out-Null                        # origin tag is annotated(A)
+        Git-Do tag -d v0.9.0 | Out-Null                               # drop local
+        Git-Do tag -a v0.9.0 -m rel | Out-Null                        # recreate annotated at HEAD=B, not pushed
+    } finally { Pop-Location }
+    $x = Invoke-Release $l9.Work '0.9.0'
+    Assert-That ($x.Code -eq 2 -and $x.Out -match 'on origin points to') 'refuse when origin annotated tag points to wrong commit'
+    Assert-That (-not (Test-Path -LiteralPath (Join-Path $l9.Work 'dist'))) 'no dist/ on refusal (annotated wrong commit)'
+
     Write-Host 'Release.Tests.ps1: OK'
     exit 0
 }

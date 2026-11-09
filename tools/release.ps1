@@ -17,6 +17,7 @@ $collector = Join-Path $repo 'Invoke-VeridanCollection.ps1'
 $tag       = "v$Version"
 
 if (-not (Test-Path -LiteralPath $collector)) { Deny "collector not found at $collector" }
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Deny 'git was not found on PATH' }
 
 # Run a read-only git command in the repo. stderr is discarded and ErrorActionPreference is
 # Continue inside this function (function-scoped, so the caller keeps Stop) so a git warning on
@@ -50,8 +51,8 @@ if ($tagCommit -ne $head) { Deny "tag $tag does not point to HEAD" }
 # commit, so prefer it; a lightweight tag has no peeled line and its plain line is the commit.
 $remoteLines = (Invoke-Git ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}") -split "`r?`n" | Where-Object { $_.Trim() }
 if (-not $remoteLines) { Deny "tag $tag is not on origin" }
-$deref = $remoteLines | Where-Object { $_ -match ([regex]::Escape("refs/tags/$tag") + '\^\{\}$') } | Select-Object -First 1
-$plain = $remoteLines | Where-Object { $_ -match ([regex]::Escape("refs/tags/$tag") + '$') }     | Select-Object -First 1
+$deref = $remoteLines | Where-Object { $_ -match ('\t' + [regex]::Escape("refs/tags/$tag") + '\^\{\}$') } | Select-Object -First 1
+$plain = $remoteLines | Where-Object { $_ -match ('\t' + [regex]::Escape("refs/tags/$tag") + '$') }       | Select-Object -First 1
 $remoteRef = if ($deref) { $deref } else { $plain }
 if (-not $remoteRef) { Deny "cannot parse origin ref for tag $tag from ls-remote output" }
 $remoteSha = (($remoteRef -split '\s+')[0]).Trim()
