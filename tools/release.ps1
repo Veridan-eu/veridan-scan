@@ -1,8 +1,8 @@
 # tools/release.ps1 - stamp collectorCommit into a dist/ copy and write SHA256SUMS.
 # Publishing is a person's step: this script PRINTS the gh command, it never runs it.
-# Spec rev 3, section 12 step 2. No new Graph scopes, nothing against a tenant.
+# No new Graph scopes, nothing against a tenant.
 [CmdletBinding()]
-param([Parameter(Mandatory = $true)][ValidatePattern('^\d+\.\d+\.\d+$')][string] $Version)
+param([Parameter(Mandatory = $true)][string] $Version)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -11,6 +11,10 @@ function Deny([string] $Message) {
     Write-Host "REFUSED: $Message"
     exit 2
 }
+
+# Validate -Version in the body (a REFUSED/exit 2, the contract) rather than with [ValidatePattern],
+# whose binding failure is a bare exit 1. \z (absolute end, no trailing newline) not $.
+if ($Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+\z') { Deny "Version '$Version' is not x.y.z" }
 
 $repo      = Split-Path -Parent $PSScriptRoot
 $collector = Join-Path $repo 'Invoke-VeridanCollection.ps1'
@@ -63,16 +67,25 @@ $remoteSha = if ($peelSha) { $peelSha } else { $plainSha }
 if (-not $remoteSha) { Deny "tag $tag is not on origin" }
 if ($remoteSha -ne $head) { Deny "tag $tag on origin points to $remoteSha, not HEAD ($head)" }
 
-# The byte splice below assumes the working-tree bytes equal the committed blob (the repo's
-# .gitattributes '* -text' guarantees it, so core.autocrlf does not rewrite anything). Verify it,
-# so a local .git/info/attributes or a smudge filter that rewrote the bytes becomes a REFUSED
-# rather than a silently re-encoded release.
-$wtHash   = (Invoke-Git hash-object --no-filters $collector).Trim()
+# Read the bytes once - these exact bytes are what we splice and write. Their git blob hash must
+# equal the committed blob, so a local .git/info/attributes or a smudge filter that rewrote the
+# working tree becomes a REFUSED rather than a silently re-encoded release (.gitattributes '* -text'
+# keeps them equal normally). Hashing $bytes (not a second git read of the file) closes the gap
+# between what is verified and what is written. A git blob hash is SHA1 of "blob <len>\0" + content;
+# this assumes the repo's default SHA-1 object format. A SHA-256 object-format repo would produce a
+# different `rev-parse HEAD:...` hash and be refused here - correctly, since release is SHA-1 only.
+$bytes = [System.IO.File]::ReadAllBytes($collector)
+$blobHeader = [System.Text.Encoding]::ASCII.GetBytes("blob $($bytes.Length)`0")
+$buf = New-Object 'byte[]' ($blobHeader.Length + $bytes.Length)
+[Array]::Copy($blobHeader, 0, $buf, 0, $blobHeader.Length)
+[Array]::Copy($bytes, 0, $buf, $blobHeader.Length, $bytes.Length)
+$sha1 = [System.Security.Cryptography.SHA1]::Create()
+try { $wtHash = (($sha1.ComputeHash($buf) | ForEach-Object { $_.ToString('x2') }) -join '') }
+finally { $sha1.Dispose() }
 $blobHash = (Invoke-Git rev-parse "HEAD:Invoke-VeridanCollection.ps1").Trim()
 if ($wtHash -ne $blobHash) { Deny 'the working-tree collector differs from its committed blob (check .gitattributes / smudge filters)' }
 
 # --- file checks (text view is only for matching; the bytes are what we write) ---
-$bytes = [System.IO.File]::ReadAllBytes($collector)
 $text  = [System.Text.Encoding]::UTF8.GetString($bytes)
 
 $vMatch = [regex]::Match($text, '(?m)^\$COLLECTOR_VERSION = ''([^'']*)''')

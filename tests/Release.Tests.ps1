@@ -223,6 +223,68 @@ try {
         Assert-That (-not (Test-Path -LiteralPath (Join-Path $lab.Work 'dist'))) "no dist/ on refusal (dev $($case.n)x)"
     }
 
+    # --- invalid -Version: a body REFUSED/exit 2, not a [ValidatePattern] binding error (exit 1). ---
+    foreach ($bad in @('0.9', '0.9.0.1', '0.9.x', 'v0.9.0')) {
+        $lv = New-Lab; $labs += $lv.Root
+        $x = Invoke-Release $lv.Work $bad
+        Assert-That ($x.Code -eq 2 -and $x.Out -match 'REFUSED' -and $x.Out -match 'is not x\.y\.z') "refuse invalid -Version '$bad'"
+        Assert-That (-not (Test-Path -LiteralPath (Join-Path $lv.Work 'dist'))) "no dist/ on refusal (version '$bad')"
+    }
+
+    # --- a stray origin ref refs/heads/refs/tags/<tag> (ls-remote matches it by tail) must be ignored
+    # by the exact ref compare; the real tag at HEAD still releases. ---
+    $ls = New-Lab; $labs += $ls.Root; Add-Tag $ls.Work 'v0.9.0'
+    Push-Location $ls.Work
+    try {
+        Set-Content -LiteralPath 'stray.txt' -Value 'x'
+        Git-Do add -A | Out-Null
+        Git-Do commit -q -m stray | Out-Null
+        $strayCommit = ((Git-Do rev-parse HEAD) | Out-String).Trim()
+        Git-Do reset -q --hard HEAD~1 | Out-Null                        # back to the tagged HEAD == origin/main
+        Git-Do push -q origin "${strayCommit}:refs/heads/refs/tags/v0.9.0" | Out-Null
+    } finally { Pop-Location }
+    $r = Invoke-Release $ls.Work '0.9.0'
+    Assert-That ($r.Code -eq 0) "stray refs/heads/refs/tags ref ignored, release succeeds (got $($r.Code): $($r.Out))"
+    Assert-That (Test-Path -LiteralPath (Join-Path $ls.Work 'dist\Invoke-VeridanCollection.ps1')) 'dist written despite stray ref'
+
+    # --- the real tag is only LOCAL (not pushed), and the sole matching origin ref is the stray
+    # refs/heads/refs/tags/<tag> pointing at HEAD. The old suffix compare would have matched the stray
+    # and wrongly released; the exact compare ignores it, so the tag is "not on origin" -> REFUSED. ---
+    $lsr = New-Lab; $labs += $lsr.Root
+    Push-Location $lsr.Work
+    try {
+        Git-Do tag v0.9.0 | Out-Null                                    # local tag at HEAD, NOT pushed
+        $headSha = ((Git-Do rev-parse HEAD) | Out-String).Trim()
+        Git-Do push -q origin "${headSha}:refs/heads/refs/tags/v0.9.0" | Out-Null   # stray ref -> HEAD
+    } finally { Pop-Location }
+    $x = Invoke-Release $lsr.Work '0.9.0'
+    Assert-That ($x.Code -eq 2 -and $x.Out -match 'is not on origin') 'refuse when only a stray refs/heads/refs/tags ref is on origin'
+    Assert-That (-not (Test-Path -LiteralPath (Join-Path $lsr.Work 'dist'))) 'no dist/ on refusal (stray ref only)'
+
+    # --- hash guard: working-tree bytes differ from the committed blob while git status is clean
+    # (simulated with --assume-unchanged) -> REFUSED before any splice. ---
+    $lh = New-Lab; $labs += $lh.Root; Add-Tag $lh.Work 'v0.9.0'
+    Push-Location $lh.Work
+    try {
+        Git-Do update-index --assume-unchanged Invoke-VeridanCollection.ps1 | Out-Null
+        Add-Content -LiteralPath 'Invoke-VeridanCollection.ps1' -Value '# tampered after commit'
+    } finally { Pop-Location }
+    $x = Invoke-Release $lh.Work '0.9.0'
+    Assert-That ($x.Code -eq 2 -and $x.Out -match 'differs from its committed blob') 'refuse when working tree differs from blob (hash guard)'
+    Assert-That (-not (Test-Path -LiteralPath (Join-Path $lh.Work 'dist'))) 'no dist/ on refusal (hash guard)'
+
+    # --- git not on PATH: a REFUSED, not a bare exit 1 from the first git call. ---
+    $lg = New-Lab; $labs += $lg.Root
+    $relg = Join-Path $lg.Work 'tools\release.ps1'
+    $savedPath = $env:PATH
+    try {
+        $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\WindowsPowerShell\v1.0"
+        $gout = & powershell -NoProfile -ExecutionPolicy Bypass -File $relg -Version '0.9.0' 2>&1
+        $gcode = $LASTEXITCODE
+    } finally { $env:PATH = $savedPath }
+    Assert-That ($gcode -eq 2 -and ($gout | Out-String) -match 'git was not found on PATH') 'refuse when git is not on PATH'
+    Assert-That (-not (Test-Path -LiteralPath (Join-Path $lg.Work 'dist'))) 'no dist/ on refusal (git missing)'
+
     Write-Host 'Release.Tests.ps1: OK'
     exit 0
 }
