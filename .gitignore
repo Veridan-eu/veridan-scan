@@ -1,0 +1,6 @@
+# Build output of tools/release.ps1 (a person publishes it; it is never committed).
+dist/
+
+# Collector output: Invoke-VeridanCollection.ps1 writes scan results beside itself; if the
+# script is ever run from a checkout of this public repo, the results must not be committable.
+collections/

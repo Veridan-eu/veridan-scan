@@ -10,6 +10,7 @@ A read-only PowerShell script that reads the configuration of a Microsoft 365 te
 
 - Free mode (the default) runs on your own computer, with your own sign-in and delegated **read** permissions only.
 - It writes `collections\veridan-scan-<yyyyMMdd-HHmmss>.json` next to the script, plus a `.sha256` file for that output.
+- A published release also records `collectorCommit` in the output file: the exact commit the release was built from. A file you run from the source in this repository does not carry that field.
 - The Free file contains counts only: no user, group or service principal objects, no names, no email addresses, no tenant ID. [`examples/`](examples/) has a Free file from our own lab tenant and one from a virtual demo tenant (`free-demo-M02-v0.8.23.json`, collector 0.8.23).
 - It changes nothing in your tenant. It signs in with `-ContextScope Process` and calls `Disconnect-MgGraph` at the end, so no token stays cached in your profile.
 - It sends nothing. Uploading the file to Veridan is a separate step that you choose.
@@ -28,8 +29,11 @@ A read-only PowerShell script that reads the configuration of a Microsoft 365 te
 ### Run
 
 ```powershell
-# 1. Check that the script is unchanged: compare with the SHA-256 in the release notes
-Get-FileHash .\Invoke-VeridanCollection.ps1 -Algorithm SHA256
+# 1. Get Invoke-VeridanCollection.ps1 from the latest GitHub release (not from the source here)
+#    and check it is unchanged: its SHA-256 must equal the line in the release's SHA256SUMS,
+#    which is also shown in the release notes. -eq is case-insensitive, so the lower-case
+#    SHA256SUMS hash compares cleanly.
+(Get-FileHash .\Invoke-VeridanCollection.ps1 -Algorithm SHA256).Hash -eq '<hash from SHA256SUMS>'
 
 # 2. The script is not code-signed yet; after the check, unblock it
 Unblock-File .\Invoke-VeridanCollection.ps1
@@ -60,6 +64,7 @@ Een PowerShell-script dat alleen leest: het leest de configuratie van een Micros
 
 - De Free-modus (standaard) draait op je eigen computer, met je eigen aanmelding en alleen gedelegeerde **lees**rechten.
 - Het script schrijft `collections\veridan-scan-<yyyyMMdd-HHmmss>.json` naast het script, plus een `.sha256`-bestand voor die uitvoer.
+- Een gepubliceerde release neemt ook `collectorCommit` op in het uitvoerbestand: de exacte commit waaruit de release is gebouwd. Een bestand dat je vanuit de broncode in deze repository draait, heeft dat veld niet. <!-- concept NL: ter review door een native speaker -->
 - Het Free-bestand bevat alleen getallen: geen gebruikers-, groeps- of service-principal-objecten, geen namen, geen e-mailadressen, geen tenant-ID. In [`examples/`](examples/) staat een Free-bestand uit onze eigen labtenant en een uit een virtuele demotenant (`free-demo-M02-v0.8.23.json`, collector 0.8.23). <!-- concept NL: ter review door een native speaker -->
 - Het wijzigt niets in je tenant. Het meldt zich aan met `-ContextScope Process` en roept aan het eind `Disconnect-MgGraph` aan, zodat er geen token in je profiel achterblijft.
 - Het verstuurt niets. Het bestand naar Veridan uploaden is een aparte stap waar je zelf voor kiest.
@@ -78,8 +83,11 @@ Een PowerShell-script dat alleen leest: het leest de configuratie van een Micros
 ### Uitvoeren
 
 ```powershell
-# 1. Controleer of het script ongewijzigd is: vergelijk met de SHA-256 in de release notes
-Get-FileHash .\Invoke-VeridanCollection.ps1 -Algorithm SHA256
+# 1. Haal Invoke-VeridanCollection.ps1 uit de nieuwste GitHub-release (niet uit de broncode hier)
+#    en controleer of het ongewijzigd is: de SHA-256 moet gelijk zijn aan de regel in SHA256SUMS
+#    van de release, die ook in de release notes staat. -eq is hoofdletterongevoelig, dus de
+#    kleineletter-hash uit SHA256SUMS vergelijkt netjes.
+(Get-FileHash .\Invoke-VeridanCollection.ps1 -Algorithm SHA256).Hash -eq '<hash uit SHA256SUMS>'
 
 # 2. Het script is nog niet ondertekend met een codecertificaat; deblokkeer het na de controle
 Unblock-File .\Invoke-VeridanCollection.ps1

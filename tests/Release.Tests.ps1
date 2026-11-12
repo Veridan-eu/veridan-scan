@@ -1,0 +1,293 @@
+# tests/Release.Tests.ps1 - tools/release.ps1 (spec rev 3, section 12 step 2).
+# Each case builds a throwaway repo in TEMP (work tree + bare origin, a commit, a tag) and runs
+# the real release.ps1 against it. Nothing here touches a real tenant or the real origin.
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+
+$repoRoot      = Split-Path -Parent $PSScriptRoot
+$realCollector = Join-Path $repoRoot 'Invoke-VeridanCollection.ps1'
+$realRelease   = Join-Path $repoRoot 'tools\release.ps1'
+
+function Assert-That([bool] $cond, [string] $msg) { if (-not $cond) { throw "FAIL: $msg" } }
+
+# Run git with stderr discarded (its LF/CRLF and info lines must not become terminating errors
+# under ErrorActionPreference Stop) and fail only on a non-zero exit code.
+function Git-Do {
+    $out = & git @args 2>$null
+    if ($LASTEXITCODE -ne 0) { throw "git $($args -join ' ') failed (exit $LASTEXITCODE)" }
+    $out
+}
+
+function New-Lab {
+    param([switch] $Bom)
+    $root = Join-Path ([System.IO.Path]::GetTempPath()) ('rel-' + [Guid]::NewGuid().ToString('N'))
+    $work = Join-Path $root 'work'
+    $bare = Join-Path $root 'origin.git'
+    New-Item -ItemType Directory -Force -Path (Join-Path $work 'tools') | Out-Null
+    $bytes = [System.IO.File]::ReadAllBytes($realCollector)
+    if ($Bom) { $bytes = [byte[]]@(0xEF, 0xBB, 0xBF) + $bytes }
+    [System.IO.File]::WriteAllBytes((Join-Path $work 'Invoke-VeridanCollection.ps1'), $bytes)
+    Copy-Item -LiteralPath $realRelease -Destination (Join-Path $work 'tools\release.ps1')
+    Set-Content -LiteralPath (Join-Path $work '.gitignore') -Value 'dist/'   # mirror the repo: dist/ is ignored
+    Push-Location $work
+    try {
+        Git-Do init -q | Out-Null
+        Git-Do config core.autocrlf false | Out-Null       # the collector is LF; no CRLF rewrite, no warning
+        Git-Do config core.safecrlf false | Out-Null
+        Git-Do config user.email 'test@veridan.local' | Out-Null
+        Git-Do config user.name  'test' | Out-Null
+        Git-Do checkout -q -b main | Out-Null
+        Git-Do add -A | Out-Null
+        Git-Do commit -q -m init | Out-Null
+        Git-Do init -q --bare $bare | Out-Null
+        Git-Do remote add origin $bare | Out-Null
+        Git-Do push -q origin main | Out-Null
+    } finally { Pop-Location }
+    [pscustomobject]@{ Root = $root; Work = $work }
+}
+
+function Add-Tag($work, $tag) {
+    Push-Location $work
+    try { Git-Do tag $tag | Out-Null; Git-Do push -q origin $tag | Out-Null } finally { Pop-Location }
+}
+
+function Invoke-Release($work, $version) {
+    $rel = Join-Path $work 'tools\release.ps1'
+    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $rel -Version $version 2>&1
+    [pscustomobject]@{ Code = $LASTEXITCODE; Out = ($out | Out-String) }
+}
+
+$labs = @()
+try {
+    # --- success ---
+    $lab = New-Lab; $labs += $lab.Root
+    Add-Tag $lab.Work 'v0.9.0'
+    $r = Invoke-Release $lab.Work '0.9.0'
+    Assert-That ($r.Code -eq 0) "success exits 0 (got $($r.Code): $($r.Out))"
+    $distFile = Join-Path $lab.Work 'dist\Invoke-VeridanCollection.ps1'
+    Assert-That (Test-Path -LiteralPath $distFile) 'dist collector written'
+    $head = ((Git-Do -C $lab.Work rev-parse HEAD) | Out-String).Trim()
+    $srcText = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes((Join-Path $lab.Work 'Invoke-VeridanCollection.ps1')))
+    $dstText = [System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes($distFile))
+    $expected = $srcText.Replace("`$COLLECTOR_COMMIT = 'dev'", "`$COLLECTOR_COMMIT = '$head'")
+    Assert-That ($dstText -ceq $expected) 'only the collectorCommit line changed'
+    $realHash = (Get-FileHash -LiteralPath $distFile -Algorithm SHA256).Hash.ToLower()
+    $sums = (Get-Content -LiteralPath (Join-Path $lab.Work 'dist\SHA256SUMS') -Raw)
+    Assert-That ($sums.Trim() -eq "$realHash  Invoke-VeridanCollection.ps1") 'SHA256SUMS line correct'
+    Assert-That ($r.Out -match 'gh release create v0.9.0') 'prints the gh command'
+    Assert-That ($r.Out -notmatch '(?m)^gh ') 'does not run gh itself'
+
+    # --- second run: byte-identical dist ---
+    $b1 = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($distFile))
+    $r2 = Invoke-Release $lab.Work '0.9.0'
+    Assert-That ($r2.Code -eq 0) 'second run exits 0'
+    $b2 = [Convert]::ToBase64String([System.IO.File]::ReadAllBytes($distFile))
+    Assert-That ($b1 -eq $b2) 'second run is byte-identical'
+
+    # --- BOM preserved ---
+    $labB = New-Lab -Bom; $labs += $labB.Root
+    Add-Tag $labB.Work 'v0.9.0'
+    $rb = Invoke-Release $labB.Work '0.9.0'
+    Assert-That ($rb.Code -eq 0) "BOM lab exits 0 (got $($rb.Code): $($rb.Out))"
+    $distB = [System.IO.File]::ReadAllBytes((Join-Path $labB.Work 'dist\Invoke-VeridanCollection.ps1'))
+    Assert-That ($distB[0] -eq 0xEF -and $distB[1] -eq 0xBB -and $distB[2] -eq 0xBF) 'BOM preserved'
+
+    # --- refusals: each separately, exit 2, dist/ not created ---
+    $l1 = New-Lab; $labs += $l1.Root; Add-Tag $l1.Work 'v0.9.0'
+    Add-Content -LiteralPath (Join-Path $l1.Work 'Invoke-VeridanCollection.ps1') -Value '# dirty'
+    $x = Invoke-Release $l1.Work '0.9.0'
+    Assert-That ($x.Code -eq 2 -and $x.Out -match 'REFUSED') 'refuse on uncommitted changes'
+    Assert-That (-not (Test-Path -LiteralPath (Join-Path $l1.Work 'dist'))) 'no dist/ on refusal (dirty)'
+
+    $l2 = New-Lab; $labs += $l2.Root            # no tag
+    $x = Invoke-Release $l2.Work '0.9.0'
+    Assert-That ($x.Code -eq 2 -and $x.Out -match 'REFUSED') 'refuse on missing tag'
+    Assert-That (-not (Test-Path -LiteralPath (Join-Path $l2.Work 'dist'))) 'no dist/ on refusal (tag)'
+
+    $l3 = New-Lab; $labs += $l3.Root; Add-Tag $l3.Work 'v0.9.1'   # file is 0.9.0
+    $x = Invoke-Release $l3.Work '0.9.1'
+    Assert-That ($x.Code -eq 2 -and $x.Out -match 'COLLECTOR_VERSION is') 'refuse on version mismatch'
+    Assert-That (-not (Test-Path -LiteralPath (Join-Path $l3.Work 'dist'))) 'no dist/ on refusal (version mismatch)'
+
+    $l4 = New-Lab; $labs += $l4.Root; Add-Tag $l4.Work 'v0.9.0'   # commit after tag/push
+    Push-Location $l4.Work
+    try { Set-Content -LiteralPath 'extra.txt' -Value 'x'; Git-Do add -A | Out-Null; Git-Do commit -q -m more | Out-Null } finally { Pop-Location }
+    $x = Invoke-Release $l4.Work '0.9.0'
+    Assert-That ($x.Code -eq 2 -and $x.Out -match 'is not origin/main') 'refuse when HEAD is ahead of origin/main'
+    Assert-That (-not (Test-Path -LiteralPath (Join-Path $l4.Work 'dist'))) 'no dist/ on refusal (HEAD ahead)'
+
+    # --- remote tag points to a different commit than HEAD ---
+    # HEAD == origin/main == B, local tag v0.9.0 == B, but origin's tag is force-moved to A.
+    # Every earlier check passes; only the remote-tag-SHA comparison must catch it.
+    $l5 = New-Lab; $labs += $l5.Root
+    Push-Location $l5.Work
+    try {
+        $shaA = ((Git-Do rev-parse HEAD) | Out-String).Trim()               # init commit, already on origin
+        Set-Content -LiteralPath 'more.txt' -Value 'y'
+        Git-Do add -A | Out-Null
+        Git-Do commit -q -m second | Out-Null
+        Git-Do push -q origin main | Out-Null                               # HEAD == origin/main == B
+        Git-Do tag v0.9.0 | Out-Null                                        # local tag at B (HEAD)
+        Git-Do push -q origin v0.9.0 | Out-Null                             # origin tag at B
+        Git-Do push -q --force origin "${shaA}:refs/tags/v0.9.0" | Out-Null # origin tag force-moved to A
+    } finally { Pop-Location }
+    $x = Invoke-Release $l5.Work '0.9.0'
+    Assert-That ($x.Code -eq 2 -and $x.Out -match 'on origin points to') 'refuse when origin tag points elsewhere'
+    Assert-That (-not (Test-Path -LiteralPath (Join-Path $l5.Work 'dist'))) 'no dist/ on refusal (remote tag SHA)'
+
+    # --- git command fails with a non-zero exit: Invoke-Git must REFUSE, not throw a bare exit 1.
+    # Under Windows PowerShell 5.1 with ErrorActionPreference Stop, native-command stderr can
+    # surface as a terminating error; removing origin makes 'git fetch origin' fail (exit != 0),
+    # which must become a REFUSED + exit 2 with no dist/.
+    $l6 = New-Lab; $labs += $l6.Root; Add-Tag $l6.Work 'v0.9.0'
+    Push-Location $l6.Work
+    try { Git-Do remote remove origin | Out-Null } finally { Pop-Location }
+    $x = Invoke-Release $l6.Work '0.9.0'
+    Assert-That ($x.Code -eq 2 -and $x.Out -match 'REFUSED' -and $x.Out -match 'failed \(exit') 'git non-zero exit becomes REFUSED'
+    Assert-That (-not (Test-Path -LiteralPath (Join-Path $l6.Work 'dist'))) 'no dist/ on refusal (git exit)'
+
+    # --- annotated tag success: exercises the ls-remote '^{}' dereference branch in release.ps1.
+    $l7 = New-Lab; $labs += $l7.Root
+    Push-Location $l7.Work
+    try { Git-Do tag -a v0.9.0 -m 'release 0.9.0' | Out-Null; Git-Do push -q origin v0.9.0 | Out-Null } finally { Pop-Location }
+    $r7 = Invoke-Release $l7.Work '0.9.0'
+    Assert-That ($r7.Code -eq 0) "annotated-tag success exits 0 (got $($r7.Code): $($r7.Out))"
+    Assert-That (Test-Path -LiteralPath (Join-Path $l7.Work 'dist\Invoke-VeridanCollection.ps1')) 'dist written for annotated tag'
+
+    # --- tag exists locally (at HEAD) but was never pushed: must REFUSE 'is not on origin'. ---
+    $l8 = New-Lab; $labs += $l8.Root
+    Push-Location $l8.Work
+    try { Git-Do tag v0.9.0 | Out-Null } finally { Pop-Location }   # local tag at HEAD, no push
+    $x = Invoke-Release $l8.Work '0.9.0'
+    Assert-That ($x.Code -eq 2 -and $x.Out -match 'is not on origin') 'refuse when tag is only local'
+    Assert-That (-not (Test-Path -LiteralPath (Join-Path $l8.Work 'dist'))) 'no dist/ on refusal (tag not on origin)'
+
+    # --- annotated tag whose origin copy points to the wrong commit: must REFUSE 'on origin points to'.
+    # Local annotated tag is at HEAD (passes the local check); origin's annotated tag is at an earlier
+    # commit, so only the remote-SHA comparison (via the peeled ^{} line) can catch it.
+    $l9 = New-Lab; $labs += $l9.Root
+    Push-Location $l9.Work
+    try {
+        $aSha = ((Git-Do rev-parse HEAD) | Out-String).Trim()          # A (init), already on origin
+        Set-Content -LiteralPath 'c.txt' -Value 'z'
+        Git-Do add -A | Out-Null
+        Git-Do commit -q -m third | Out-Null
+        Git-Do push -q origin main | Out-Null                          # HEAD == origin/main == B
+        Git-Do tag -a v0.9.0 -m rel $aSha | Out-Null                   # annotated tag -> A
+        Git-Do push -q origin v0.9.0 | Out-Null                        # origin tag is annotated(A)
+        Git-Do tag -d v0.9.0 | Out-Null                               # drop local
+        Git-Do tag -a v0.9.0 -m rel | Out-Null                        # recreate annotated at HEAD=B, not pushed
+    } finally { Pop-Location }
+    $x = Invoke-Release $l9.Work '0.9.0'
+    Assert-That ($x.Code -eq 2 -and $x.Out -match 'on origin points to') 'refuse when origin annotated tag points to wrong commit'
+    Assert-That (-not (Test-Path -LiteralPath (Join-Path $l9.Work 'dist'))) 'no dist/ on refusal (annotated wrong commit)'
+
+    # --- local annotated tag points to a commit other than HEAD: REFUSE 'does not point to HEAD'.
+    # HEAD == origin/main == B, so the origin/main check passes; the local-tag-resolves-to-HEAD
+    # check is what must catch an annotated tag made at an earlier commit.
+    $l10 = New-Lab; $labs += $l10.Root
+    Push-Location $l10.Work
+    try {
+        $aSha = ((Git-Do rev-parse HEAD) | Out-String).Trim()          # A (init)
+        Set-Content -LiteralPath 'd.txt' -Value 'w'
+        Git-Do add -A | Out-Null
+        Git-Do commit -q -m fourth | Out-Null
+        Git-Do push -q origin main | Out-Null                          # HEAD == origin/main == B
+        Git-Do tag -a v0.9.0 -m rel $aSha | Out-Null                   # local annotated tag -> A, not HEAD
+    } finally { Pop-Location }
+    $x = Invoke-Release $l10.Work '0.9.0'
+    Assert-That ($x.Code -eq 2 -and $x.Out -match 'does not point to HEAD') 'refuse when local tag is not at HEAD'
+    Assert-That (-not (Test-Path -LiteralPath (Join-Path $l10.Work 'dist'))) 'no dist/ on refusal (local tag not HEAD)'
+
+    # --- $COLLECTOR_COMMIT = 'dev' must occur exactly once. Doctor the committed collector so the
+    # needle appears 0x / 2x (committed, so the tree is clean and the hash guard still matches), and
+    # confirm the dev-count check refuses before any byte splice.
+    foreach ($case in @(@{ n = 0; repl = "`$COLLECTOR_COMMIT = ''" },
+                        @{ n = 2; repl = "`$COLLECTOR_COMMIT = 'dev'`n`$COLLECTOR_COMMIT = 'dev'" })) {
+        $lab = New-Lab; $labs += $lab.Root
+        Push-Location $lab.Work
+        try {
+            $c  = Join-Path $lab.Work 'Invoke-VeridanCollection.ps1'
+            $t  = [System.IO.File]::ReadAllText($c, [System.Text.Encoding]::UTF8)
+            $t2 = $t.Replace("`$COLLECTOR_COMMIT = 'dev'", $case.repl)
+            Assert-That ($t2 -ne $t) "setup: dev needle rewritten ($($case.n)x)"
+            [System.IO.File]::WriteAllText($c, $t2, (New-Object System.Text.UTF8Encoding $false))
+            Git-Do add -A | Out-Null
+            Git-Do commit -q -m "dev needle $($case.n)x" | Out-Null
+            Git-Do push -q origin main | Out-Null
+            Git-Do tag v0.9.0 | Out-Null
+            Git-Do push -q origin v0.9.0 | Out-Null
+        } finally { Pop-Location }
+        $x = Invoke-Release $lab.Work '0.9.0'
+        Assert-That ($x.Code -eq 2 -and $x.Out -match "occurs $($case.n) time") "refuse when dev needle occurs $($case.n)x"
+        Assert-That (-not (Test-Path -LiteralPath (Join-Path $lab.Work 'dist'))) "no dist/ on refusal (dev $($case.n)x)"
+    }
+
+    # --- invalid -Version: a body REFUSED/exit 2, not a [ValidatePattern] binding error (exit 1). ---
+    foreach ($bad in @('0.9', '0.9.0.1', '0.9.x', 'v0.9.0')) {
+        $lv = New-Lab; $labs += $lv.Root
+        $x = Invoke-Release $lv.Work $bad
+        Assert-That ($x.Code -eq 2 -and $x.Out -match 'REFUSED' -and $x.Out -match 'is not x\.y\.z') "refuse invalid -Version '$bad'"
+        Assert-That (-not (Test-Path -LiteralPath (Join-Path $lv.Work 'dist'))) "no dist/ on refusal (version '$bad')"
+    }
+
+    # --- a stray origin ref refs/heads/refs/tags/<tag> (ls-remote matches it by tail) must be ignored
+    # by the exact ref compare; the real tag at HEAD still releases. ---
+    $ls = New-Lab; $labs += $ls.Root; Add-Tag $ls.Work 'v0.9.0'
+    Push-Location $ls.Work
+    try {
+        Set-Content -LiteralPath 'stray.txt' -Value 'x'
+        Git-Do add -A | Out-Null
+        Git-Do commit -q -m stray | Out-Null
+        $strayCommit = ((Git-Do rev-parse HEAD) | Out-String).Trim()
+        Git-Do reset -q --hard HEAD~1 | Out-Null                        # back to the tagged HEAD == origin/main
+        Git-Do push -q origin "${strayCommit}:refs/heads/refs/tags/v0.9.0" | Out-Null
+    } finally { Pop-Location }
+    $r = Invoke-Release $ls.Work '0.9.0'
+    Assert-That ($r.Code -eq 0) "stray refs/heads/refs/tags ref ignored, release succeeds (got $($r.Code): $($r.Out))"
+    Assert-That (Test-Path -LiteralPath (Join-Path $ls.Work 'dist\Invoke-VeridanCollection.ps1')) 'dist written despite stray ref'
+
+    # --- the real tag is only LOCAL (not pushed), and the sole matching origin ref is the stray
+    # refs/heads/refs/tags/<tag> pointing at HEAD. The old suffix compare would have matched the stray
+    # and wrongly released; the exact compare ignores it, so the tag is "not on origin" -> REFUSED. ---
+    $lsr = New-Lab; $labs += $lsr.Root
+    Push-Location $lsr.Work
+    try {
+        Git-Do tag v0.9.0 | Out-Null                                    # local tag at HEAD, NOT pushed
+        $headSha = ((Git-Do rev-parse HEAD) | Out-String).Trim()
+        Git-Do push -q origin "${headSha}:refs/heads/refs/tags/v0.9.0" | Out-Null   # stray ref -> HEAD
+    } finally { Pop-Location }
+    $x = Invoke-Release $lsr.Work '0.9.0'
+    Assert-That ($x.Code -eq 2 -and $x.Out -match 'is not on origin') 'refuse when only a stray refs/heads/refs/tags ref is on origin'
+    Assert-That (-not (Test-Path -LiteralPath (Join-Path $lsr.Work 'dist'))) 'no dist/ on refusal (stray ref only)'
+
+    # --- hash guard: working-tree bytes differ from the committed blob while git status is clean
+    # (simulated with --assume-unchanged) -> REFUSED before any splice. ---
+    $lh = New-Lab; $labs += $lh.Root; Add-Tag $lh.Work 'v0.9.0'
+    Push-Location $lh.Work
+    try {
+        Git-Do update-index --assume-unchanged Invoke-VeridanCollection.ps1 | Out-Null
+        Add-Content -LiteralPath 'Invoke-VeridanCollection.ps1' -Value '# tampered after commit'
+    } finally { Pop-Location }
+    $x = Invoke-Release $lh.Work '0.9.0'
+    Assert-That ($x.Code -eq 2 -and $x.Out -match 'differs from its committed blob') 'refuse when working tree differs from blob (hash guard)'
+    Assert-That (-not (Test-Path -LiteralPath (Join-Path $lh.Work 'dist'))) 'no dist/ on refusal (hash guard)'
+
+    # --- git not on PATH: a REFUSED, not a bare exit 1 from the first git call. ---
+    $lg = New-Lab; $labs += $lg.Root
+    $relg = Join-Path $lg.Work 'tools\release.ps1'
+    $savedPath = $env:PATH
+    try {
+        $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\WindowsPowerShell\v1.0"
+        $gout = & powershell -NoProfile -ExecutionPolicy Bypass -File $relg -Version '0.9.0' 2>&1
+        $gcode = $LASTEXITCODE
+    } finally { $env:PATH = $savedPath }
+    Assert-That ($gcode -eq 2 -and ($gout | Out-String) -match 'git was not found on PATH') 'refuse when git is not on PATH'
+    Assert-That (-not (Test-Path -LiteralPath (Join-Path $lg.Work 'dist'))) 'no dist/ on refusal (git missing)'
+
+    Write-Host 'Release.Tests.ps1: OK'
+    exit 0
+}
+finally {
+    foreach ($d in $labs) { Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue }
+}
