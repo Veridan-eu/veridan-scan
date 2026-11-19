@@ -37,6 +37,7 @@
 param(
     [Parameter(Mandatory)][string] $TenantId,
     [switch] $Remove,
+    [switch] $UseDeviceCode,   # sign in with a code on another device (no browser window here: SSH, server core)
     [string] $ClientId,
     [int] $ValidDays = 14,
     [string] $DisplayName = 'Read-only configuration review'
@@ -218,7 +219,9 @@ if ($forbidden -contains $TenantId.ToLowerInvariant()) { throw "Refusing: tenant
 
 $exit = 0
 try {
-    Connect-MgGraph -TenantId $TenantId -Scopes 'Application.ReadWrite.All' -ContextScope Process -NoWelcome
+    $connect = @{ TenantId = $TenantId; Scopes = 'Application.ReadWrite.All'; ContextScope = 'Process'; NoWelcome = $true }
+    if ($UseDeviceCode) { $connect.UseDeviceCode = $true }
+    Connect-MgGraph @connect
     Assert-VdaTenantAllowed -Connected (Get-MgContext).TenantId -Requested $TenantId -Forbidden $forbidden
     if ($Remove) {
         $left = @(Remove-VdaAccess -ClientId $ClientId -Invoke $invoke -Cert $certApi)
