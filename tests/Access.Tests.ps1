@@ -161,7 +161,7 @@ Assert-That ($left3.Count -eq 0) 'unknown app id: nothing left to report'
 $certDated = @{
     new    = { param($Subject, $NotAfter) $t = ([guid]::NewGuid().ToString('N') + '00000000').Substring(0, 40).ToUpperInvariant(); $certs[$t] = $Subject
                # the store keeps whole seconds and backdates NotBefore; the requested $NotAfter has milliseconds
-               return [pscustomobject]@{ Thumbprint = $t; NotBefore = [datetime]'2026-11-19T20:55:52'; NotAfter = [datetime]'2026-12-03T21:05:25'; RawData = [byte[]](1, 2, 3) } }
+               return [pscustomobject]@{ Thumbprint = $t; NotBefore = [datetime]::SpecifyKind([datetime]'2026-11-19T18:55:52', 'Utc').ToLocalTime(); NotAfter = [datetime]::SpecifyKind([datetime]'2026-12-03T19:05:25', 'Utc').ToLocalTime(); RawData = [byte[]](1, 2, 3) } }
     exists = $certApi.exists
     remove = $certApi.remove
 }
@@ -169,22 +169,31 @@ $g4 = New-FakeGraph
 $r4 = New-VdaAccess -TenantId '22222222-2222-4222-8222-222222222222' -DisplayName 'Read-only configuration review' -ValidDays 14 -Invoke $g4.invoke -Cert $certDated
 $k4 = $g4.state.apps[$r4.ClientId].body.keyCredentials[0]
 $inv = [Globalization.CultureInfo]::InvariantCulture
-Assert-That ($k4.endDateTime -eq ([datetime]'2026-12-03T21:05:25').ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', $inv)) "endDateTime is the certificate's NotAfter in UTC (got $($k4.endDateTime))"
-Assert-That ($k4.startDateTime -eq ([datetime]'2026-11-19T20:55:52').ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', $inv)) "startDateTime is the certificate's NotBefore in UTC (got $($k4.startDateTime))"
+# Local-kind dates like a real certificate; the expected values are UTC literals (a missing conversion fails off-UTC)
+Assert-That ($k4.endDateTime -eq '2026-12-03T19:05:25Z') "endDateTime is the certificate's NotAfter in UTC (got $($k4.endDateTime))"
+Assert-That ($k4.startDateTime -eq '2026-11-19T18:55:52Z') "startDateTime is the certificate's NotBefore in UTC (got $($k4.startDateTime))"
 Assert-That ($k4.endDateTime -match '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$') 'whole seconds, UTC, Z suffix'
 $null = Remove-VdaAccess -ClientId $r4.ClientId -Invoke $g4.invoke -Cert $certDated
 
 # --- 6c. a failed create leaves nothing and shows the original error ---
 $g5 = New-FakeGraph
 $inner = $g5.invoke
+$seen = @{ cert = $null }
 $failSp = { param([string]$Method, [string]$Uri, $Body)
-    if ($Method -eq 'POST' -and $Uri -like '*/servicePrincipals') { throw 'boom: service principal' }
+    if ($Method -eq 'POST' -and $Uri -like '*/servicePrincipals') { $seen.cert = @($certs.Keys | Where-Object { $before -notcontains $_ }); throw 'boom: service principal' }
     & $inner $Method $Uri $Body }.GetNewClosure()
 $before = @($certs.Keys)
-Assert-Throws { New-VdaAccess -TenantId '22222222-2222-4222-8222-222222222222' -DisplayName 'Read-only configuration review' -ValidDays 14 -Invoke $failSp -Cert $certApi 3>$null } '*boom: service principal*' 'the original error is rethrown'
-Assert-That ($g5.state.apps.Count -eq 0) 'the half-made app is deleted'
-Assert-That ($g5.state.deleted.Count -eq 0) 'and purged from the recycle bin'
-Assert-That (@($certs.Keys | Where-Object { $before -notcontains $_ }).Count -eq 0) 'the new local certificate is removed'
+$err = $null; $warn = New-Object System.Collections.ArrayList
+try { & { New-VdaAccess -TenantId '22222222-2222-4222-8222-222222222222' -DisplayName 'Read-only configuration review' -ValidDays 14 -Invoke $failSp -Cert $certApi } 3>&1 |
+        ForEach-Object { if ($_ -is [System.Management.Automation.WarningRecord]) { [void]$warn.Add($_.Message) } } }
+catch { $err = $_ }
+Assert-That ($null -ne $err -and $err.Exception.Message -eq 'boom: service principal') "the original error is rethrown unchanged (got: $($err.Exception.Message))"
+Assert-That (@($seen.cert).Count -eq 1) 'a certificate existed when the create failed'
+Assert-That (@($g5.state.calls | Where-Object { $_ -match '^DELETE .*/applications/' }).Count -eq 1) 'the half-made app was deleted'
+Assert-That (@($g5.state.calls | Where-Object { $_ -match '^DELETE .*/directory/deletedItems/' }).Count -eq 1) 'and purged from the recycle bin'
+Assert-That ($g5.state.apps.Count -eq 0 -and $g5.state.deleted.Count -eq 0) 'nothing of it is left in the fake tenant'
+Assert-That (-not $certs.ContainsKey($seen.cert[0])) 'the new local certificate is removed'
+Assert-That (@($warn).Count -eq 0) "no warning when the cleanup succeeds (got: $(@($warn) -join '; '))"
 
 # --- 7. source invariants ---
 $src = Get-Content -Raw -LiteralPath $script
@@ -192,6 +201,7 @@ Assert-That ($src -match "-ContextScope Process") 'signs in with -ContextScope P
 Assert-That ($src -match 'Disconnect-MgGraph') 'disconnects at the end'
 Assert-That ($src -match "CurrentUser\\My") 'the key stays in CurrentUser\My'
 Assert-That ($src -match 'NonExportable') 'the key is not exportable'
+Assert-That ($src -match 'endDateTime\s*=\s*\$end\.ToUniversalTime\(\)') 'the key end date is converted to UTC (6b only bites off-UTC)'
 Assert-That ($src -notmatch '(?i)passwordCredentials\s*=\s*@\(\s*@') 'no client secret is ever created'
 
 Write-Host 'Access.Tests.ps1: all assertions passed' -ForegroundColor Green

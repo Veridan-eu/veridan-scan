@@ -32,8 +32,8 @@
   tenants block that flow: Security Defaults (AADSTS530035) or a Conditional Access policy on authentication flows.
   If it is blocked, run the script in a normal PowerShell 7 window instead; do not weaken the client's policy.
 
-  A failed create leaves nothing behind: the half-made app is deleted and purged and the local certificate removed;
-  anything that could not be cleaned up is printed as a warning, and the original error is shown.
+  If a create fails, the script deletes and purges the half-made app and removes the local certificate; it warns
+  about anything it could not remove, and the original error is shown.
 
 .EXAMPLE
   .\New-VeridanAccess.ps1 -TenantId <guid>
