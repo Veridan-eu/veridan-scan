@@ -132,6 +132,8 @@ function New-VdaAccess {
     $roleIds = Get-VdaGraphRoleIds -Invoke $Invoke
     $notAfter = (Get-Date).AddDays($days)
     $c = & $Cert.new "CN=$DisplayName" $notAfter
+    $app = $null
+    try {
     # Graph checks the key's dates against the certificate itself: use the certificate's own NotBefore/NotAfter (whole
     # seconds in the store), never the Get-Date value it was asked for (milliseconds) - KeyCredentialsInvalidEndDate on T2.
     $start = if ($c.PSObject.Properties['NotBefore'] -and $c.NotBefore) { [datetime]$c.NotBefore } else { (Get-Date) }
@@ -150,21 +152,29 @@ function New-VdaAccess {
             usage       = 'Verify'
             key         = [Convert]::ToBase64String($c.RawData)
             displayName = "CN=$DisplayName"
-            startDateTime = $start.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-            endDateTime   = $end.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+            startDateTime = $start.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture)
+            endDateTime   = $end.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', [Globalization.CultureInfo]::InvariantCulture)
         })
     }
-    $app = $null
-    try {
         $app = & $Invoke 'POST' "$(Get-VdaGraphBase)/applications" $body
         Write-Item "app registration $($app.appId)"
         $null = & $Invoke 'POST' "$(Get-VdaGraphBase)/servicePrincipals" @{ appId = $app.appId }
         Write-Item 'service principal created'
     } catch {
-        # a failed create leaves nothing: the half-made app (if any) and the local certificate go
-        if ($app -and $app.id) { try { $null = & $Invoke 'DELETE' "$(Get-VdaGraphBase)/applications/$($app.id)" $null } catch { } }
-        if (& $Cert.exists $c.Thumbprint) { & $Cert.remove $c.Thumbprint; Write-Item "certificate $($c.Thumbprint) removed (create failed)" }
-        throw
+        # a failed create leaves nothing: the half-made app (deleted, purged, its SP goes with it) and the local certificate.
+        # Cleanup problems are reported, never allowed to replace the original error.
+        $original = $_
+        if ($app -and $app.appId) {
+            try {
+                $left = @(Remove-VdaAccess -ClientId $app.appId -Invoke $Invoke -Cert $Cert)
+                if ($left.Count) { Write-Warning "create failed and cleanup left: $($left -join '; ')" }
+            } catch { Write-Warning "create failed and cleanup of app $($app.appId) failed: $($_.Exception.Message)" }
+        } elseif (-not $app) {
+            Write-Warning "create failed before an app id came back; if an app named '$DisplayName' exists in the tenant, remove it by hand"
+        }
+        try { if (& $Cert.exists $c.Thumbprint) { & $Cert.remove $c.Thumbprint; Write-Item "certificate $($c.Thumbprint) removed (create failed)" } }
+        catch { Write-Warning "create failed and certificate $($c.Thumbprint) could not be removed: $($_.Exception.Message)" }
+        throw $original
     }
     return [pscustomobject]@{
         ClientId              = $app.appId
