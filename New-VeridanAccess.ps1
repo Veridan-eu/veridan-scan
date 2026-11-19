@@ -132,7 +132,11 @@ function New-VdaAccess {
     $roleIds = Get-VdaGraphRoleIds -Invoke $Invoke
     $notAfter = (Get-Date).AddDays($days)
     $c = & $Cert.new "CN=$DisplayName" $notAfter
-    Write-Item "certificate $($c.Thumbprint) (Cert:\CurrentUser\My, valid until $($notAfter.ToString('yyyy-MM-dd')))"
+    # Graph checks the key's dates against the certificate itself: use the certificate's own NotBefore/NotAfter (whole
+    # seconds in the store), never the Get-Date value it was asked for (milliseconds) - KeyCredentialsInvalidEndDate on T2.
+    $start = if ($c.PSObject.Properties['NotBefore'] -and $c.NotBefore) { [datetime]$c.NotBefore } else { (Get-Date) }
+    $end = if ($c.PSObject.Properties['NotAfter'] -and $c.NotAfter) { [datetime]$c.NotAfter } else { $notAfter }
+    Write-Item "certificate $($c.Thumbprint) (Cert:\CurrentUser\My, valid until $($end.ToString('yyyy-MM-dd')))"
     $body = @{
         displayName            = $DisplayName
         signInAudience         = 'AzureADMyOrg'
@@ -146,17 +150,26 @@ function New-VdaAccess {
             usage       = 'Verify'
             key         = [Convert]::ToBase64String($c.RawData)
             displayName = "CN=$DisplayName"
-            endDateTime = $notAfter.ToUniversalTime().ToString('o')
+            startDateTime = $start.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+            endDateTime   = $end.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
         })
     }
-    $app = & $Invoke 'POST' "$(Get-VdaGraphBase)/applications" $body
-    Write-Item "app registration $($app.appId)"
-    $null = & $Invoke 'POST' "$(Get-VdaGraphBase)/servicePrincipals" @{ appId = $app.appId }
-    Write-Item 'service principal created'
+    $app = $null
+    try {
+        $app = & $Invoke 'POST' "$(Get-VdaGraphBase)/applications" $body
+        Write-Item "app registration $($app.appId)"
+        $null = & $Invoke 'POST' "$(Get-VdaGraphBase)/servicePrincipals" @{ appId = $app.appId }
+        Write-Item 'service principal created'
+    } catch {
+        # a failed create leaves nothing: the half-made app (if any) and the local certificate go
+        if ($app -and $app.id) { try { $null = & $Invoke 'DELETE' "$(Get-VdaGraphBase)/applications/$($app.id)" $null } catch { } }
+        if (& $Cert.exists $c.Thumbprint) { & $Cert.remove $c.Thumbprint; Write-Item "certificate $($c.Thumbprint) removed (create failed)" }
+        throw
+    }
     return [pscustomobject]@{
         ClientId              = $app.appId
         CertificateThumbprint = $c.Thumbprint
-        NotAfter              = $notAfter
+        NotAfter              = $end
         ConsentUrl            = "https://login.microsoftonline.com/$TenantId/adminconsent?client_id=$($app.appId)"
     }
 }
