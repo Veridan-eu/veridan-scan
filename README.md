@@ -48,6 +48,26 @@ Without `-TenantId` the script uses the default tenant of the signed-in account 
 
 The same script has a Full mode (`-Mode Full`). It needs an app registration with a certificate and is used only in a paid engagement, under a contract and a data processing agreement. You do not need it for the free scan. With `-IncludeScubaGear`, Full mode calls [ScubaGear](https://github.com/cisagov/ScubaGear) if it is installed; ScubaGear is not part of this repository.
 
+#### Full mode: access and removal
+
+`New-VeridanAccess.ps1` creates the access for one engagement and removes it afterwards. Access is removed after every Full scan and granted again for the next one.
+
+```powershell
+# 1. An administrator of the client tenant signs in; the script creates an app registration with the eight read
+#    permissions above (application permissions, no client secret), its service principal, and a certificate valid
+#    for 14 days (-ValidDays, at most 30) whose private key stays, non-exportable, in Cert:\CurrentUser\My.
+.\New-VeridanAccess.ps1 -TenantId <tenant-id>
+# 2. A Privileged Role Administrator or Global Administrator of the client approves the permissions at the
+#    printed admin-consent link. The script never grants consent itself.
+# 3. The Full scan, with the app id and thumbprint the script printed.
+.\Invoke-VeridanCollection.ps1 -Mode Full -TenantId <tenant-id> -ClientId <app-id> -CertificateThumbprint <thumbprint>
+# 4. Remove: deletes the app (and its service principal), purges it from the recycle bin, deletes the certificate
+#    from this machine, and checks that nothing is left; exits 1 and names what is left if anything is.
+.\New-VeridanAccess.ps1 -TenantId <tenant-id> -Remove -ClientId <app-id>
+```
+
+The client sees the app and its permissions in Entra (Enterprise applications) and can disable or delete it at any time. Tenants listed in `forbidden-tenants.txt` next to the script are refused before anything is created or deleted.
+
 ### Not in this repository
 
 Veridan's rules, framework mappings, scoring and dossier templates.
@@ -101,6 +121,26 @@ Zonder `-TenantId` gebruikt het script de standaardtenant van het aangemelde acc
 ### Full-modus
 
 Hetzelfde script heeft een Full-modus (`-Mode Full`). Die heeft een app-registratie met een certificaat nodig en wordt alleen gebruikt bij een betaalde opdracht, met een overeenkomst en een verwerkersovereenkomst. Voor de gratis scan heb je hem niet nodig. Met `-IncludeScubaGear` roept de Full-modus [ScubaGear](https://github.com/cisagov/ScubaGear) aan als het geïnstalleerd is; ScubaGear zit niet in deze repository.
+
+#### Full-modus: toegang en verwijderen <!-- concept NL: ter review door een native speaker -->
+
+`New-VeridanAccess.ps1` maakt de toegang voor één opdracht aan en verwijdert die daarna weer. Na elke Full-scan wordt de toegang verwijderd en voor de volgende scan opnieuw verleend.
+
+```powershell
+# 1. Een beheerder van de tenant van de klant meldt zich aan; het script maakt een app-registratie met de acht
+#    leesrechten hierboven (toepassingsmachtigingen, geen clientgeheim), de service principal en een certificaat
+#    dat 14 dagen geldig is (-ValidDays, maximaal 30), met een niet-exporteerbare privésleutel in Cert:\CurrentUser\My.
+.\New-VeridanAccess.ps1 -TenantId <tenant-id>
+# 2. Een Privileged Role Administrator of Global Administrator van de klant keurt de rechten goed via de getoonde
+#    link voor beheerderstoestemming. Het script geeft zelf nooit toestemming.
+# 3. De Full-scan, met de app-id en vingerafdruk die het script toonde.
+.\Invoke-VeridanCollection.ps1 -Mode Full -TenantId <tenant-id> -ClientId <app-id> -CertificateThumbprint <vingerafdruk>
+# 4. Verwijderen: verwijdert de app (en de service principal), ook uit de prullenbak, verwijdert het certificaat
+#    van deze computer en controleert dat er niets achterblijft; eindigt met code 1 en noemt wat er nog is.
+.\New-VeridanAccess.ps1 -TenantId <tenant-id> -Remove -ClientId <app-id>
+```
+
+De klant ziet de app en de rechten in Entra (Enterprise applications) en kan hem op elk moment uitschakelen of verwijderen. Tenants in `forbidden-tenants.txt` naast het script worden geweigerd voordat er iets wordt aangemaakt of verwijderd.
 
 ### Niet in deze repository
 
