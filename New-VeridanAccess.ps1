@@ -27,6 +27,13 @@
   Sign-in: delegated, as an administrator of the client tenant, with Application.ReadWrite.All only,
   -ContextScope Process, and Disconnect-MgGraph at the end. The tenant is checked after sign-in against
   -TenantId and against forbidden-tenants.txt next to this script, before anything is created or deleted.
+  The default sign-in is interactive (a browser window, or Web Account Manager on Windows). -UseDeviceCode signs in
+  with a code on another device instead, for a console without a window (SSH, server core, a remote shell). Many
+  tenants block that flow: Security Defaults (AADSTS530035) or a Conditional Access policy on authentication flows.
+  If it is blocked, run the script in a normal PowerShell 7 window instead; do not weaken the client's policy.
+
+  A failed create leaves nothing behind: the half-made app is deleted and purged and the local certificate removed;
+  anything that could not be cleaned up is printed as a warning, and the original error is shown.
 
 .EXAMPLE
   .\New-VeridanAccess.ps1 -TenantId <guid>

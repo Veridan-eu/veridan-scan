@@ -157,6 +157,35 @@ $g3 = New-FakeGraph
 $left3 = @(Remove-VdaAccess -ClientId '33333333-3333-4333-8333-333333333333' -Invoke $g3.invoke -Cert $certApi)
 Assert-That ($left3.Count -eq 0) 'unknown app id: nothing left to report'
 
+# --- 6b. key dates come from the certificate itself (T2, 19.11: KeyCredentialsInvalidEndDate) ---
+$certDated = @{
+    new    = { param($Subject, $NotAfter) $t = ([guid]::NewGuid().ToString('N') + '00000000').Substring(0, 40).ToUpperInvariant(); $certs[$t] = $Subject
+               # the store keeps whole seconds and backdates NotBefore; the requested $NotAfter has milliseconds
+               return [pscustomobject]@{ Thumbprint = $t; NotBefore = [datetime]'2026-11-19T20:55:52'; NotAfter = [datetime]'2026-12-03T21:05:25'; RawData = [byte[]](1, 2, 3) } }
+    exists = $certApi.exists
+    remove = $certApi.remove
+}
+$g4 = New-FakeGraph
+$r4 = New-VdaAccess -TenantId '22222222-2222-4222-8222-222222222222' -DisplayName 'Read-only configuration review' -ValidDays 14 -Invoke $g4.invoke -Cert $certDated
+$k4 = $g4.state.apps[$r4.ClientId].body.keyCredentials[0]
+$inv = [Globalization.CultureInfo]::InvariantCulture
+Assert-That ($k4.endDateTime -eq ([datetime]'2026-12-03T21:05:25').ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', $inv)) "endDateTime is the certificate's NotAfter in UTC (got $($k4.endDateTime))"
+Assert-That ($k4.startDateTime -eq ([datetime]'2026-11-19T20:55:52').ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ', $inv)) "startDateTime is the certificate's NotBefore in UTC (got $($k4.startDateTime))"
+Assert-That ($k4.endDateTime -match '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$') 'whole seconds, UTC, Z suffix'
+$null = Remove-VdaAccess -ClientId $r4.ClientId -Invoke $g4.invoke -Cert $certDated
+
+# --- 6c. a failed create leaves nothing and shows the original error ---
+$g5 = New-FakeGraph
+$inner = $g5.invoke
+$failSp = { param([string]$Method, [string]$Uri, $Body)
+    if ($Method -eq 'POST' -and $Uri -like '*/servicePrincipals') { throw 'boom: service principal' }
+    & $inner $Method $Uri $Body }.GetNewClosure()
+$before = @($certs.Keys)
+Assert-Throws { New-VdaAccess -TenantId '22222222-2222-4222-8222-222222222222' -DisplayName 'Read-only configuration review' -ValidDays 14 -Invoke $failSp -Cert $certApi 3>$null } '*boom: service principal*' 'the original error is rethrown'
+Assert-That ($g5.state.apps.Count -eq 0) 'the half-made app is deleted'
+Assert-That ($g5.state.deleted.Count -eq 0) 'and purged from the recycle bin'
+Assert-That (@($certs.Keys | Where-Object { $before -notcontains $_ }).Count -eq 0) 'the new local certificate is removed'
+
 # --- 7. source invariants ---
 $src = Get-Content -Raw -LiteralPath $script
 Assert-That ($src -match "-ContextScope Process") 'signs in with -ContextScope Process'
