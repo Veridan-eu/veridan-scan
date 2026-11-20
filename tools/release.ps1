@@ -1,8 +1,20 @@
 # tools/release.ps1 - stamp collectorCommit into a dist/ copy and write SHA256SUMS.
 # Publishing is a person's step: this script PRINTS the gh command, it never runs it.
 # No new Graph scopes, nothing against a tenant.
+#
+# Optional -Sign: Authenticode-signs dist\Invoke-VeridanCollection.ps1 through tools\sign.ps1 (Azure
+# Artifact Signing with -MetadataPath; or, for tests only, -TestCertificateThumbprint). The order is
+# fixed: stamp collectorCommit -> sign -> THEN SHA256SUMS over the signed bytes, because the signature
+# block changes the file. If signing fails the half-made dist\ files are removed and the run is REFUSED.
+# Without -Sign nothing changes: same steps, same bytes, same output as before.
 [CmdletBinding()]
-param([Parameter(Mandatory = $true)][string] $Version)
+param(
+    [Parameter(Mandatory = $true)][string] $Version,
+    [switch] $Sign,
+    [string] $MetadataPath,
+    [string] $TestCertificateThumbprint,
+    [string] $ExpectedSubject      # passed to sign.ps1 (its default: O=Intelligence EOOD); only with -Sign
+)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -15,6 +27,11 @@ function Deny([string] $Message) {
 # Validate -Version in the body (a REFUSED/exit 2, the contract) rather than with [ValidatePattern],
 # whose binding failure is a bare exit 1. \z (absolute end, no trailing newline) not $.
 if ($Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+\z') { Deny "Version '$Version' is not x.y.z" }
+
+# The signing switches are checked up front, before git or dist\ are touched.
+if (-not $Sign -and ($MetadataPath -or $TestCertificateThumbprint -or $ExpectedSubject)) { Deny '-MetadataPath, -TestCertificateThumbprint and -ExpectedSubject are used only with -Sign' }
+if ($Sign -and $MetadataPath -and $TestCertificateThumbprint) { Deny 'give -MetadataPath (Artifact Signing) or -TestCertificateThumbprint (test), not both' }
+if ($Sign -and -not $MetadataPath -and -not $TestCertificateThumbprint) { Deny '-Sign needs -MetadataPath (Artifact Signing; see tools\signing-metadata.example.json) or -TestCertificateThumbprint (test only)' }
 
 $repo      = Split-Path -Parent $PSScriptRoot
 $collector = Join-Path $repo 'Invoke-VeridanCollection.ps1'
@@ -122,13 +139,48 @@ New-Item -ItemType Directory -Force -Path $dist | Out-Null
 $distCollector = Join-Path $dist 'Invoke-VeridanCollection.ps1'
 [System.IO.File]::WriteAllBytes($distCollector, $out)
 
+if ($Sign) {
+    # Sign the stamped file in dist\ (tools\sign.ps1 as a child process: it ends with exit 0 / REFUSED exit 2).
+    # SHA256SUMS comes after this, over the signed bytes. A failure leaves no unsigned collector behind.
+    $distSums = Join-Path $dist 'SHA256SUMS'
+    Remove-Item -LiteralPath $distSums -Force -ErrorAction SilentlyContinue
+    $signScript = Join-Path $PSScriptRoot 'sign.ps1'
+    if (-not (Test-Path -LiteralPath $signScript)) {
+        Remove-Item -LiteralPath $distCollector -Force -ErrorAction SilentlyContinue
+        Deny "signing failed: $signScript not found"
+    }
+    $signArgs = @('-Path', $distCollector)
+    if ($TestCertificateThumbprint) { $signArgs += @('-TestCertificateThumbprint', $TestCertificateThumbprint) }
+    else { $signArgs += @('-MetadataPath', $MetadataPath) }
+    if ($ExpectedSubject) { $signArgs += @('-ExpectedSubject', $ExpectedSubject) }
+    $psHost = (Get-Process -Id $PID).Path
+    $signOut = & { $ErrorActionPreference = 'Continue'; & $psHost -NoProfile -ExecutionPolicy Bypass -File $signScript @signArgs 2>&1 }
+    $signCode = $LASTEXITCODE
+    foreach ($l in @($signOut)) { Write-Host "$l" }
+    if ($signCode -ne 0) {
+        Remove-Item -LiteralPath $distCollector -Force -ErrorAction SilentlyContinue
+        Deny "signing failed (tools\sign.ps1 exit $signCode); nothing was left in dist\"
+    }
+}
+
 $sha  = (Get-FileHash -LiteralPath $distCollector -Algorithm SHA256).Hash.ToLower()
 $sums = "$sha  Invoke-VeridanCollection.ps1`n"
 [System.IO.File]::WriteAllBytes((Join-Path $dist 'SHA256SUMS'), [System.Text.Encoding]::ASCII.GetBytes($sums))
 
 Write-Host "dist\Invoke-VeridanCollection.ps1 stamped with $head"
 Write-Host "dist\SHA256SUMS: $sha"
+if ($Sign) {
+    Write-Host ''
+    Write-Host 'The collector is Authenticode-signed; SHA256SUMS is over the signed file. A user checks the signature with:'
+    Write-Host '  Get-AuthenticodeSignature .\Invoke-VeridanCollection.ps1 | Format-List Status, SignerCertificate, TimeStamperCertificate'
+    if ($TestCertificateThumbprint) { Write-Host 'WARNING: signed with a TEST certificate (self-signed, nobody trusts it).' }
+}
 Write-Host ''
+if ($TestCertificateThumbprint) {
+    # a test-signed build must never be published: no gh command is printed
+    Write-Host 'TEST build - not publishable.'
+    exit 0
+}
 Write-Host 'Publish it yourself after reviewing dist\ (this script does not publish):'
 Write-Host "  gh release create $tag dist/Invoke-VeridanCollection.ps1 dist/SHA256SUMS --title ""veridan-scan $tag"" --notes ""$sha"""
 exit 0

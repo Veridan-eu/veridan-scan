@@ -533,9 +533,9 @@
         clean but every warning carried the raw Graph message, and those quote
         the request URI (object IDs on per-object calls), request-ids and
         sometimes a UPN. Free mode now ships dataset + HTTP status only; the
-        text stays on the console. Review §2.1.
+        text stays on the console. Review section 2.1.
       - $status is reset on a successful response, so after 429 -> retry ->
-        success a caller no longer sees Failed=$false with Status=429. §2.4.
+        success a caller no longer sees Failed=$false with Status=429. section 2.4.
       - NEW: telephonyOnly / adminsTelephonyOnly. Users whose every registered
         method is SMS or voice lose their second factor on 1 Feb 2027, when
         Microsoft stops delivering telephony.
@@ -544,12 +544,12 @@
         Graph cannot see. Cbw / RDI focus area 2.
 
     STILL OPEN, and NOT fixed here because it is Vasil's call:
-      - The anonymisation salt is per-run (§2.2). Correct for Free mode; wrong
+      - The anonymisation salt is per-run (section 2.2). Correct for Free mode; wrong
         for Full mode with monitoring, because the same user gets a different
         entity_ref every month and no finding ever looks closed. Needs a
         per-engagement salt issued by the engine from Key Vault. Touches the
         engine, so it belongs in DECISIONS.md, not in this file.
-      - §2.3 throttling detection and §2.5 per-dataset IdFields: Saturday.
+      - section 2.3 throttling detection and section 2.5 per-dataset IdFields: Saturday.
 
     ========================================================================
     Veridan collector. Reads a Microsoft 365 / Entra ID tenant and emits the
@@ -614,6 +614,9 @@
     EXAMPLES
 
       .\Invoke-VeridanCollection.ps1 -Mode Free -TenantId <guid>
+      # Free mode through a public client app registered for this purpose (delegated, interactive sign-in;
+      # no certificate - a Free run never uses one, and -CertificateThumbprint with Free is refused):
+      .\Invoke-VeridanCollection.ps1 -Mode Free -TenantId <guid> -ClientId <app id>
       .\Invoke-VeridanCollection.ps1 -Mode Full -TenantId <guid> `
           -ClientId <guid> -CertificateThumbprint <thumb> -IncludeScubaGear
       .\Invoke-VeridanCollection.ps1 -Mode Full -TenantId <guid> -Anonymise
@@ -628,7 +631,11 @@ param(
     # several tenants gets whichever one happens to be default.
     [string] $TenantId,
 
+    # Full mode: the app-only app registration. Free mode: optionally a PUBLIC client app id (delegated,
+    # interactive sign-in, no certificate); without it Free uses $VERIDAN_SCAN_APP_ID when that is set,
+    # otherwise the Microsoft Graph Command Line Tools app.
     [string] $ClientId,
+    # Full mode only; a Free run never uses a certificate and refuses this parameter.
     [string] $CertificateThumbprint,
 
     [string] $OutputPath = "$PSScriptRoot\collections",
@@ -671,6 +678,14 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $COLLECTOR_VERSION = '0.9.0'
+
+# The application (client) id of the multi-tenant, publisher-verified "Veridan Scan" public client app goes
+# here once it is registered (tools/New-VeridanScanApp.ps1) and its publisher is verified. When it is
+# non-empty and no -ClientId was passed in Free mode, Free mode signs in through it (delegated, interactive).
+# While it is empty Free mode keeps today's behaviour: the Microsoft Graph Command Line Tools app.
+# It is a public client id, not a secret; Full mode never uses it.
+$VERIDAN_SCAN_APP_ID = ''
+
 # D-001: this is the version of engine/schema/normalized.schema.json - the
 # engine's contract, the engine's numbering. It is NOT this collector's build
 # (that is $COLLECTOR_VERSION) and it does not move when the output shape
@@ -888,6 +903,40 @@ function Assert-VdnTenantAllowed {
     if ($Forbidden -contains $c) {
         throw "Refusing to collect: tenant $Connected is listed in forbidden-tenants.txt on this machine."
     }
+}
+
+function Get-VdnConnectParams {
+    <#
+        The Connect-MgGraph splat for this run (the main block calls Connect-MgGraph @params).
+
+        Full: app-only with a certificate - -TenantId, -ClientId and -CertificateThumbprint are all
+        required; the Veridan Scan app id is never used.
+        Free: delegated and interactive, with the read scopes. A Free run never uses a certificate, so
+        -CertificateThumbprint is refused. -ClientId, when given, is a PUBLIC client app id; when it is
+        not given, -ScanAppId (the $VERIDAN_SCAN_APP_ID constant) is used if non-empty; when both are
+        empty no -ClientId is passed and Connect-MgGraph uses the Microsoft Graph Command Line Tools app.
+        Always -ContextScope Process and -NoWelcome, so no token is left in the client's profile.
+    #>
+    param([string] $Mode, [string] $TenantId, [string] $ClientId, [string] $CertificateThumbprint,
+          [string[]] $Scopes, [string] $ScanAppId)
+    if ($Mode -eq 'Full') {
+        if (-not ($TenantId -and $ClientId -and $CertificateThumbprint)) {
+            throw 'Full mode requires -TenantId, -ClientId and -CertificateThumbprint.'
+        }
+        return @{ TenantId = $TenantId; ClientId = $ClientId; CertificateThumbprint = $CertificateThumbprint
+                  ContextScope = 'Process'; NoWelcome = $true }
+    }
+    if ($CertificateThumbprint) {
+        throw 'Free mode signs in as you and never uses a certificate: remove -CertificateThumbprint (certificates are for -Mode Full).'
+    }
+    $app = if ($ClientId) { $ClientId } else { $ScanAppId }
+    if ($app -and $app -notmatch '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') {
+        throw "-ClientId '$app' is not a GUID (the application id of a public client app)."
+    }
+    $p = @{ Scopes = $Scopes; ContextScope = 'Process'; NoWelcome = $true }
+    if ($TenantId) { $p.TenantId = $TenantId }
+    if ($app) { $p.ClientId = $app }
+    return $p
 }
 
 function Test-DatasetOk {
@@ -1399,7 +1448,7 @@ function Get-VdnGroups {
         # Guarded since v0.8.7. The lab's three groups are all Unified with a
         # mail address, so "Graph returns explicit nulls for groups" was only
         # ever observed on groups that had few nulls to omit. Under the
-        # collector's own §3.7 belief this block crashed on $g.mail (simulator
+        # collector's own section 3.7 belief this block crashed on $g.mail (simulator
         # D13/P47, 18 Sep). Get-Prop costs nothing and removes the bet.
         # #43: null, not [], when the call failed. Assigned through variables on
         # purpose - $(if ...) inside the literal would unroll a one-element list
@@ -2510,20 +2559,12 @@ $scopes = @('Directory.Read.All','Policy.Read.All','AuditLog.Read.All','Applicat
             'DeviceManagementConfiguration.Read.All','Organization.Read.All')
 
 try {
-    if ($Mode -eq 'Full') {
-        if (-not ($TenantId -and $ClientId -and $CertificateThumbprint)) {
-            throw 'Full mode requires -TenantId, -ClientId and -CertificateThumbprint.'
-        }
-        Connect-MgGraph -TenantId $TenantId -ClientId $ClientId `
-            -CertificateThumbprint $CertificateThumbprint -ContextScope Process -NoWelcome
-    } else {
-        if ($TenantId) {
-            Connect-MgGraph -TenantId $TenantId -Scopes $scopes -ContextScope Process -NoWelcome
-        } else {
-            Write-Host '   ! No -TenantId given; connecting to your default tenant.' -ForegroundColor Yellow
-            Connect-MgGraph -Scopes $scopes -ContextScope Process -NoWelcome
-        }
+    $connectParams = Get-VdnConnectParams -Mode $Mode -TenantId $TenantId -ClientId $ClientId `
+        -CertificateThumbprint $CertificateThumbprint -Scopes $scopes -ScanAppId $VERIDAN_SCAN_APP_ID
+    if ($Mode -ne 'Full' -and -not $TenantId) {
+        Write-Host '   ! No -TenantId given; connecting to your default tenant.' -ForegroundColor Yellow
     }
+    Connect-MgGraph @connectParams
 
     $ctx = Get-MgContext
     Write-Item "connected to $($ctx.TenantId) as $(if ($ctx.Account) { $ctx.Account } else { $ctx.ClientId })"
