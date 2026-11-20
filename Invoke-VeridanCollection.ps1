@@ -533,9 +533,9 @@
         clean but every warning carried the raw Graph message, and those quote
         the request URI (object IDs on per-object calls), request-ids and
         sometimes a UPN. Free mode now ships dataset + HTTP status only; the
-        text stays on the console. Review §2.1.
+        text stays on the console. Review section 2.1.
       - $status is reset on a successful response, so after 429 -> retry ->
-        success a caller no longer sees Failed=$false with Status=429. §2.4.
+        success a caller no longer sees Failed=$false with Status=429. section 2.4.
       - NEW: telephonyOnly / adminsTelephonyOnly. Users whose every registered
         method is SMS or voice lose their second factor on 1 Feb 2027, when
         Microsoft stops delivering telephony.
@@ -544,12 +544,12 @@
         Graph cannot see. Cbw / RDI focus area 2.
 
     STILL OPEN, and NOT fixed here because it is Vasil's call:
-      - The anonymisation salt is per-run (§2.2). Correct for Free mode; wrong
+      - The anonymisation salt is per-run (section 2.2). Correct for Free mode; wrong
         for Full mode with monitoring, because the same user gets a different
         entity_ref every month and no finding ever looks closed. Needs a
         per-engagement salt issued by the engine from Key Vault. Touches the
         engine, so it belongs in DECISIONS.md, not in this file.
-      - §2.3 throttling detection and §2.5 per-dataset IdFields: Saturday.
+      - section 2.3 throttling detection and section 2.5 per-dataset IdFields: Saturday.
 
     ========================================================================
     Veridan collector. Reads a Microsoft 365 / Entra ID tenant and emits the
@@ -1448,7 +1448,7 @@ function Get-VdnGroups {
         # Guarded since v0.8.7. The lab's three groups are all Unified with a
         # mail address, so "Graph returns explicit nulls for groups" was only
         # ever observed on groups that had few nulls to omit. Under the
-        # collector's own §3.7 belief this block crashed on $g.mail (simulator
+        # collector's own section 3.7 belief this block crashed on $g.mail (simulator
         # D13/P47, 18 Sep). Get-Prop costs nothing and removes the bet.
         # #43: null, not [], when the call failed. Assigned through variables on
         # purpose - $(if ...) inside the literal would unroll a one-element list

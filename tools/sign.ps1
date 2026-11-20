@@ -15,11 +15,14 @@
 #
 # After signing EVERY file the signature is read back (Get-AuthenticodeSignature) and checked:
 #   production: Status Valid, a timestamp (TimeStamperCertificate), and a signer subject that contains
-#               -ExpectedSubject (default 'O=Intelligence EOOD': it must equal the validated legal name in the
+#               -ExpectedSubject (default 'O=Intelligence EOOD': an exact RDN of the signer subject, key and
+#               value compared whole, not a substring; it must equal the validated legal name in the
 #               Artifact Signing certificate profile);
 #   test:       Status Valid or UnknownError (untrusted self-signed root) and a signer thumbprint equal to
 #               -TestCertificateThumbprint.
 # Anything else is REFUSED, exit 2, naming the file. Same contract as tools/release.ps1.
+#
+# A .ps1 with non-ASCII bytes and no UTF-8 BOM is refused (its signature would depend on the ANSI code page).
 #
 # Guard: files outside the repository's dist\ folder are refused unless -AllowOutsideDist is passed, so the
 # wrong thing cannot be signed by a typo. Every path is checked before the first file is signed.
@@ -112,8 +115,55 @@ function Assert-VsgSignature {
     }
     if ($status -ne 'Valid') { Deny "$File : Status is $status, not Valid" }
     if ($null -eq $Signature.TimeStamperCertificate) { Deny "$File : the signature carries no timestamp" }
-    if ($Signature.SignerCertificate.Subject.IndexOf($ExpectedSubject, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
-        Deny "$File : signer '$($Signature.SignerCertificate.Subject)' does not contain '$ExpectedSubject'"
+    if (-not (Test-VsgSubject -Subject $Signature.SignerCertificate.Subject -Expected $ExpectedSubject)) {
+        Deny "$File : signer '$($Signature.SignerCertificate.Subject)' does not have the exact name part '$ExpectedSubject'"
+    }
+}
+
+function Split-VsgDn {
+    # A distinguished name -> list of @{ Key; Value } (one per RDN). Commas inside "quotes" or after a backslash
+    # do not split; quotes are removed. Enough for certificate subjects like: CN=Name, O="Org, Ltd", C=BG.
+    param([string] $Dn)
+    $parts = New-Object System.Collections.ArrayList
+    $sb = New-Object System.Text.StringBuilder
+    $inQuote = $false; $esc = $false
+    foreach ($ch in $Dn.ToCharArray()) {
+        if ($esc) { [void]$sb.Append($ch); $esc = $false; continue }
+        if ($ch -eq '\') { $esc = $true; continue }
+        if ($ch -eq '"') { $inQuote = -not $inQuote; continue }
+        if ($ch -eq ',' -and -not $inQuote) { [void]$parts.Add($sb.ToString()); [void]$sb.Clear(); continue }
+        [void]$sb.Append($ch)
+    }
+    [void]$parts.Add($sb.ToString())
+    foreach ($p in $parts) {
+        $i = $p.IndexOf('=')
+        if ($i -gt 0) { [pscustomobject]@{ Key = $p.Substring(0, $i).Trim(); Value = $p.Substring($i + 1).Trim() } }
+    }
+}
+
+function Test-VsgSubject {
+    # Every RDN of -Expected (e.g. 'O=Intelligence EOOD') must equal an RDN of the signer subject: key and value
+    # compared whole, case-insensitively. 'O=Intelligence EOOD Holding' or 'CN=O=Intelligence EOOD' do not match.
+    param([string] $Subject, [string] $Expected)
+    $have = @(Split-VsgDn -Dn $Subject)
+    $want = @(Split-VsgDn -Dn $Expected)
+    if ($want.Count -eq 0) { return $false }
+    foreach ($w in $want) {
+        $hit = @($have | Where-Object { $_.Key -ieq $w.Key -and $_.Value -ieq $w.Value })
+        if ($hit.Count -eq 0) { return $false }
+    }
+    return $true
+}
+
+function Assert-VsgEncodingSafe {
+    # Authenticode hashes a .ps1 that has no BOM in the machine's ANSI code page, so a non-ASCII byte without a
+    # UTF-8 BOM can give HashMismatch on another machine (1251 vs 1252). Refuse such a file; fix it before signing.
+    param([string] $File)
+    if ([System.IO.Path]::GetExtension($File) -notin '.ps1', '.psm1', '.psd1') { return }
+    $b = [System.IO.File]::ReadAllBytes($File)
+    if ($b.Length -ge 3 -and $b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF) { return }
+    foreach ($x in $b) {
+        if ($x -gt 127) { Deny "$File contains non-ASCII bytes and has no UTF-8 BOM: its signature could fail on other machines (ANSI code page). Make it pure ASCII, or add a BOM." }
     }
 }
 
@@ -132,6 +182,7 @@ try {
         if (-not $AllowOutsideDist -and -not (Test-VsgInsideDist -File $full -Dist $dist)) {
             Deny "$full is outside $dist (pass -AllowOutsideDist if you really mean to sign it)"
         }
+        Assert-VsgEncodingSafe -File $full
         $files += $full
     }
 

@@ -86,11 +86,35 @@ try {
     Assert-Throws { Assert-VsgSignature -Signature (New-FakeSig 'Valid' $subj 'AA' $false) -File 'f.ps1' -ExpectedSubject 'O=Intelligence EOOD' } '*timestamp*' 'production without timestamp is refused'
     Assert-Throws { Assert-VsgSignature -Signature (New-FakeSig 'UnknownError' $subj 'AA' $true) -File 'f.ps1' -ExpectedSubject 'O=Intelligence EOOD' } '*Status*' 'production needs Status Valid'
     Assert-Throws { Assert-VsgSignature -Signature (New-FakeSig 'Valid' 'CN=Someone Else, O=Other Ltd' 'AA' $true) -File 'f.ps1' -ExpectedSubject 'O=Intelligence EOOD' } '*O=Intelligence EOOD*' 'production with the wrong signer is refused'
+    # the O= RDN is compared whole, not as a substring
+    Assert-Throws { Assert-VsgSignature -Signature (New-FakeSig 'Valid' 'CN=Intelligence EOOD, O=Intelligence EOOD Holding, C=BG' 'AA' $true) -File 'f.ps1' -ExpectedSubject 'O=Intelligence EOOD' } '*exact*' 'a longer O= value is refused'
+    Assert-Throws { Assert-VsgSignature -Signature (New-FakeSig 'Valid' 'CN=O=Intelligence EOOD, O=Other Ltd' 'AA' $true) -File 'f.ps1' -ExpectedSubject 'O=Intelligence EOOD' } '*exact*' 'the text inside another RDN is refused'
+    Assert-Throws { Assert-VsgSignature -Signature (New-FakeSig 'Valid' 'CN=x, OU=Intelligence EOOD' 'AA' $true) -File 'f.ps1' -ExpectedSubject 'O=Intelligence EOOD' } '*exact*' 'OU= is not O='
+    Assert-That (Test-VsgSubject -Subject 'CN=x, o="Intelligence EOOD", C=BG' -Expected 'O=Intelligence EOOD') 'quoted value and lower-case key match'
+    Assert-That (Test-VsgSubject -Subject 'CN=x, O="Org, Ltd", C=BG' -Expected 'O="Org, Ltd"') 'a comma inside quotes does not split'
+    Assert-That (-not (Test-VsgSubject -Subject 'CN=x, O=Intelligence EOOD' -Expected '')) 'an empty expectation matches nothing'
     # test mode: UnknownError (untrusted self-signed root) accepted, thumbprint must match, no timestamp needed
     Assert-VsgSignature -Signature (New-FakeSig 'UnknownError' 'CN=t' 'ABCD' $false) -File 'f.ps1' -ExpectedSubject 'x' -TestCertificateThumbprint 'abcd'
     Assert-VsgSignature -Signature (New-FakeSig 'Valid' 'CN=t' 'ABCD' $false) -File 'f.ps1' -ExpectedSubject 'x' -TestCertificateThumbprint 'ABCD'
     Assert-Throws { Assert-VsgSignature -Signature (New-FakeSig 'UnknownError' 'CN=t' 'EEEE' $false) -File 'f.ps1' -ExpectedSubject 'x' -TestCertificateThumbprint 'ABCD' } '*thumbprint*' 'test mode: foreign signer refused'
     Assert-Throws { Assert-VsgSignature -Signature (New-FakeSig 'HashMismatch' 'CN=t' 'ABCD' $false) -File 'f.ps1' -ExpectedSubject 'x' -TestCertificateThumbprint 'ABCD' } '*Status*' 'test mode: HashMismatch refused'
+
+    # --- 5b. non-ASCII without a BOM is refused (the ANSI code page would decide the hash) ---
+    $na = Join-Path $tmpRoot 'nonascii.ps1'
+    [System.IO.File]::WriteAllBytes($na, [byte[]](0x23, 0x20, 0xC2, 0xA7, 0x0A))                 # "# <section sign>\n", no BOM
+    Assert-Throws { Assert-VsgEncodingSafe -File $na } '*non-ASCII*BOM*' 'non-ASCII bytes without a BOM are refused'
+    [System.IO.File]::WriteAllBytes($na, [byte[]](0xEF, 0xBB, 0xBF, 0x23, 0x20, 0xC2, 0xA7, 0x0A))   # with BOM
+    Assert-VsgEncodingSafe -File $na
+    [System.IO.File]::WriteAllBytes($na, [byte[]](0x23, 0x20, 0x61, 0x0A))                       # pure ASCII
+    Assert-VsgEncodingSafe -File $na
+    $nj = Join-Path $tmpRoot 'data.json'
+    [System.IO.File]::WriteAllBytes($nj, [byte[]](0xC2, 0xA7))
+    Assert-VsgEncodingSafe -File $nj                                                              # not a PowerShell file: not checked
+
+    # every PowerShell file of the repo is signable: pure ASCII or BOM
+    foreach ($f in Get-ChildItem -LiteralPath $repoRoot -Recurse -Include *.ps1, *.psm1, *.psd1 -File | Where-Object { $_.FullName -notmatch '\\(\.git|dist)\\' }) {
+        Assert-VsgEncodingSafe -File $f.FullName
+    }
 
     # --- 6. the real script, as a child process, in a lab repo ---
     $lab  = Join-Path $tmpRoot 'lab'
@@ -142,6 +166,17 @@ try {
     $r = Invoke-SignCmd "-Path '$in2','$out2' -TestCertificateThumbprint $thumb"
     Assert-That ($r.Code -eq 2) 'a mixed list is refused'
     Assert-That ((Get-AuthenticodeSignature -LiteralPath $in2).Status -eq 'NotSigned') 'nothing was signed when one path is refused'
+
+    # a non-ASCII .ps1 without BOM: the process refuses it by name and leaves it untouched; with a BOM it is signed
+    $nb = Join-Path $labDist 'nonascii-nobom.ps1'
+    [System.IO.File]::WriteAllBytes($nb, [byte[]](0x23, 0x20, 0xC2, 0xA7, 0x0A))
+    $r = Invoke-Sign -Path $nb -TestCertificateThumbprint $thumb
+    Assert-That ($r.Code -eq 2 -and $r.Out -match 'nonascii-nobom\.ps1' -and $r.Out -match 'non-ASCII') "non-ASCII without BOM is refused (got $($r.Code): $($r.Out))"
+    Assert-That ((Get-AuthenticodeSignature -LiteralPath $nb).Status -eq 'NotSigned') 'the refused file is not signed'
+    $nbom = Join-Path $labDist 'nonascii-bom.ps1'
+    [System.IO.File]::WriteAllBytes($nbom, [byte[]](0xEF, 0xBB, 0xBF, 0x23, 0x20, 0xC2, 0xA7, 0x0D, 0x0A))
+    $r = Invoke-Sign -Path $nbom -TestCertificateThumbprint $thumb
+    Assert-That ($r.Code -eq 0) "non-ASCII with a BOM is signed (got $($r.Code): $($r.Out))"
 
     # missing file, unknown thumbprint
     $r = Invoke-Sign -Path (Join-Path $labDist 'gone.ps1') -TestCertificateThumbprint $thumb
