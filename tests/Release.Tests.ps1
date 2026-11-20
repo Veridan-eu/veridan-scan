@@ -314,6 +314,8 @@ try {
     Assert-That ($sSums.Trim() -eq "$sHash  Invoke-VeridanCollection.ps1") 'SHA256SUMS is over the signed bytes'
     Assert-That ($rs.Out -match [regex]::Escape('Get-AuthenticodeSignature .\Invoke-VeridanCollection.ps1 | Format-List Status, SignerCertificate, TimeStamperCertificate')) 'publish hint shows how a user checks the signature'
     Assert-That ($rs.Out -match 'signed') 'publish hint says the file is signed'
+    Assert-That ($rs.Out -notmatch 'gh release create') 'a test-signed build prints no gh release command'
+    Assert-That ($rs.Out -match 'TEST build - not publishable') 'a test-signed build says it is not publishable'
 
     # --- -Sign refusals: bad switch combinations are refused before dist\ is written ---
     $lr = New-Lab; $labs += $lr.Root; Add-Tag $lr.Work 'v0.9.0'
@@ -324,6 +326,9 @@ try {
     Assert-That ($x.Code -eq 2 -and $x.Out -match 'only with -Sign') '-TestCertificateThumbprint without -Sign is refused'
     $x = Invoke-Release $lr.Work '0.9.0' @('-MetadataPath', 'x.json')
     Assert-That ($x.Code -eq 2 -and $x.Out -match 'only with -Sign') '-MetadataPath without -Sign is refused'
+    $x = Invoke-Release $lr.Work '0.9.0' @('-ExpectedSubject', 'O=X')
+    Assert-That ($x.Code -eq 2 -and $x.Out -match 'only with -Sign') '-ExpectedSubject without -Sign is refused'
+    Assert-That ((Get-Content -LiteralPath $realRelease -Raw) -match "'-ExpectedSubject', \`$ExpectedSubject") 'release.ps1 passes -ExpectedSubject through to sign.ps1'
     $x = Invoke-Release $lr.Work '0.9.0' @('-Sign', '-TestCertificateThumbprint', $thumb, '-MetadataPath', 'x.json')
     Assert-That ($x.Code -eq 2 -and $x.Out -match 'not both') 'test certificate and metadata together are refused'
     Assert-That (-not (Test-Path -LiteralPath (Join-Path $lr.Work 'dist'))) 'no dist/ on refusal (switch combinations)'
