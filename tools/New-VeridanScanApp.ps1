@@ -1,7 +1,7 @@
 
 <#
 .SYNOPSIS
-  Registers the multi-tenant public client app "Veridan Scan" in VERIDAN'S OWN tenant. Run once, by Vasil.
+  Registers the multi-tenant public client app "Veridan Scan" in VERIDAN'S OWN tenant. Run once, by a Veridan administrator.
 
 .DESCRIPTION
   The free Zorgplicht Scan (Invoke-VeridanCollection.ps1 -Mode Free) signs in as the customer's own administrator.
@@ -20,20 +20,27 @@
       it only acts as the signed-in customer administrator, after that administrator consents.
 
   Safety:
-    - -TenantId is required (no default). After sign-in (Application.ReadWrite.All, -ContextScope Process) the
-      script reads the tenant's verified domains and REFUSES unless they contain -ExpectedDomain (default
-      'veridan.eu'), and unless the sign-in tenant is the one asked for. It then disconnects. This tool must never
-      create an app in a client's tenant.
+    - -TenantId is required (a GUID; no default; a missing or malformed one is REFUSED, exit 2). After sign-in
+      (Application.ReadWrite.All and User.Read, -ContextScope Process) the script reads the tenant's verified
+      domains and REFUSES unless they contain 'veridan.eu' (fixed in the script, not a parameter), and unless the
+      sign-in tenant is the one asked for. It then disconnects. This tool must never create an app in a client's
+      tenant.
     - It refuses if an application named 'Veridan Scan' already exists (and prints that app's appId).
     - -WhatIf signs in, reads, runs every check, prints the exact body it would send and creates nothing.
     - It creates no service principal, grants no consent and changes nothing else.
+    - The Microsoft Graph PowerShell SDK signs in through the Windows account manager (WAM, the broker) on
+      Windows. A public client then needs the broker redirect URI next to http://localhost, and the redirect URI
+      contains the appId, so it is added by a PATCH right after the create:
+      ms-appx-web://Microsoft.AAD.BrokerPlugin/<appId>.
 
   After it has run (manual steps, also printed at the end):
     1. Publisher domain: set it to veridan.eu if it is not already (Entra admin center > App registrations >
        Veridan Scan > Branding & properties).
     2. Publisher verification: same blade, "Add MPN ID to verify publisher", with the Partner One ID (the partner
        global account of Veridan's Microsoft AI Cloud Partner Program account).
-    3. Put the appId into $VERIDAN_SCAN_APP_ID in Invoke-VeridanCollection.ps1 in a follow-up PR (a release decision).
+    3. Test one Free run with -ClientId <appId> (Invoke-VeridanCollection.ps1 -Mode Free -ClientId <appId>).
+    4. Only then put the appId into $VERIDAN_SCAN_APP_ID in Invoke-VeridanCollection.ps1 in a follow-up PR (a
+       release decision).
 
 .EXAMPLE
   .\New-VeridanScanApp.ps1 -TenantId <veridan.eu tenant id> -WhatIf
@@ -41,8 +48,8 @@
 #>
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [Parameter(Mandatory)][string] $TenantId,
-    [string] $ExpectedDomain = 'veridan.eu',
+    # Validated in the body (REFUSED, exit 2), not with Mandatory: a missing value must not turn into a prompt.
+    [string] $TenantId,
     [string] $DisplayName = 'Veridan Scan',
     [string] $MarketingUrl = 'https://veridan.eu',
     [string] $PrivacyUrl = 'https://veridan.eu/privacy/',
@@ -77,6 +84,11 @@ function Get-VsaDelegatedScopeIds {
         $ids += $byName[$n]
     }
     return $ids
+}
+
+function Get-VsaBrokerRedirectUri {
+    param([string] $AppId)
+    return "ms-appx-web://Microsoft.AAD.BrokerPlugin/$AppId"
 }
 
 function New-VsaBody {
@@ -132,7 +144,15 @@ function Invoke-VsaRegistration {
     }
     $app = & $Invoke 'POST' "$(Get-VsaGraphBase)/applications" $body
     Write-Item "application $($app.appId) created"
-    return [pscustomobject]@{ Status = 'Created'; AppId = $app.appId; Body = $body }
+
+    # WAM (the Windows sign-in broker, used by the Graph SDK) needs its own redirect URI, which contains the appId.
+    $patch = @{ publicClient = @{ redirectUris = @('http://localhost', (Get-VsaBrokerRedirectUri -AppId $app.appId)) } }
+    try { $null = & $Invoke 'PATCH' "$(Get-VsaGraphBase)/applications/$($app.id)" $patch }
+    catch {
+        throw "The application WAS created (appId $($app.appId), object id $($app.id)) but adding the broker redirect URI failed: $($_.Exception.Message). Add $(Get-VsaBrokerRedirectUri -AppId $app.appId) to Authentication > Mobile and desktop applications by hand."
+    }
+    Write-Item 'broker redirect URI added'
+    return [pscustomobject]@{ Status = 'Created'; AppId = $app.appId; Body = $body; PatchBody = $patch }
 }
 
 # ==================================================================== main
@@ -142,15 +162,27 @@ $invoke = { param([string]$Method, [string]$Uri, $Body)
     if ($null -ne $Body) { Invoke-MgGraphRequest -Method $Method -Uri $Uri -Body ($Body | ConvertTo-Json -Depth 10) -ContentType 'application/json' }
     else { Invoke-MgGraphRequest -Method $Method -Uri $Uri } }
 
+# Veridan's own domain: fixed here on purpose. It is not a parameter, so this tool cannot be pointed at another tenant by a flag.
+$ExpectedDomain = 'veridan.eu'
+
+# -TenantId is checked before anything is signed in: missing or malformed -> REFUSED, exit 2 (the contract), no prompt.
+if ($TenantId -notmatch '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\z') {
+    Write-Host 'REFUSED: -TenantId is required and must be the tenant id (a GUID) of the veridan.eu tenant.'
+    exit 2
+}
+
 $exit = 0
 try {
-    Connect-MgGraph -TenantId $TenantId -Scopes 'Application.ReadWrite.All' -ContextScope Process -NoWelcome
+    Connect-MgGraph -TenantId $TenantId -Scopes 'Application.ReadWrite.All', 'User.Read' -ContextScope Process -NoWelcome
     $r = Invoke-VsaRegistration -TenantId $TenantId -ConnectedTenantId (Get-MgContext).TenantId -ExpectedDomain $ExpectedDomain `
         -DisplayName $DisplayName -MarketingUrl $MarketingUrl -PrivacyUrl $PrivacyUrl -TermsUrl $TermsUrl -Invoke $invoke -WhatIf:$WhatIfPreference
     if ($r.Status -eq 'WhatIf') {
         Write-Host ''
         Write-Host 'WhatIf: nothing was created. This is the body that would be sent to POST /applications:' -ForegroundColor Cyan
         Write-Host ($r.Body | ConvertTo-Json -Depth 10)
+        Write-Host ''
+        Write-Host 'After the create it would PATCH the application to add the broker redirect URI (needs the new appId):' -ForegroundColor Cyan
+        Write-Host '  publicClient.redirectUris = http://localhost, ms-appx-web://Microsoft.AAD.BrokerPlugin/<appId>'
     } else {
         Write-Host ''
         Write-Host "Created '$DisplayName'. Application (client) id:" -ForegroundColor Green
@@ -159,7 +191,8 @@ try {
         Write-Host 'Next, by hand (nothing is done for you):' -ForegroundColor Cyan
         Write-Host '  1. Entra admin center > App registrations > Veridan Scan > Branding & properties: set the publisher domain to veridan.eu if it is not already.'
         Write-Host '  2. Same blade, "Add MPN ID to verify publisher": enter the Partner One ID (the partner global account of the Microsoft AI Cloud Partner Program account).'
-        Write-Host "  3. Put the appId into `$VERIDAN_SCAN_APP_ID in Invoke-VeridanCollection.ps1, in a follow-up PR (a release decision)."
+        Write-Host "  3. Test one Free run through the app: .\Invoke-VeridanCollection.ps1 -Mode Free -ClientId $($r.AppId)"
+        Write-Host "  4. Only after that works, put the appId into `$VERIDAN_SCAN_APP_ID in Invoke-VeridanCollection.ps1, in a follow-up PR (a release decision)."
     }
 } catch {
     Write-Host "REFUSED: $($_.Exception.Message)"

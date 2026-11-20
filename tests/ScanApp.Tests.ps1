@@ -41,8 +41,8 @@ Assert-That (@($ours | Where-Object { $_ -notlike '*.Read*' }).Count -eq 0) 'eve
 # --- a fake Graph in "veridan.eu"'s tenant ---
 $scopeIds = @{}
 foreach ($n in (Get-VsaPermissionNames)) { $scopeIds[$n] = [guid]::NewGuid().ToString() }
-function New-FakeGraph([string[]] $domains = @('veridan.eu', 'veridan.onmicrosoft.com'), [string] $orgId = $own, [string[]] $existingNames = @(), [string[]] $missingScopes = @()) {
-    $state = @{ calls = New-Object System.Collections.ArrayList; posts = New-Object System.Collections.ArrayList }
+function New-FakeGraph([string[]] $domains = @('veridan.eu', 'veridan.onmicrosoft.com'), [string] $orgId = $own, [string[]] $existingNames = @(), [string[]] $missingScopes = @(), [switch] $patchFails) {
+    $state = @{ calls = New-Object System.Collections.ArrayList; posts = New-Object System.Collections.ArrayList; patches = New-Object System.Collections.ArrayList }
     $invoke = {
         param([string]$Method, [string]$Uri, $Body)
         [void]$state.calls.Add("$Method $Uri")
@@ -59,6 +59,11 @@ function New-FakeGraph([string[]] $domains = @('veridan.eu', 'veridan.onmicrosof
         if ($Method -eq 'POST' -and $Uri -like '*/applications') {
             [void]$state.posts.Add($Body)
             return @{ id = 'obj-new'; appId = '55555555-5555-4555-8555-555555555555' }
+        }
+        if ($Method -eq 'PATCH' -and $Uri -like '*/applications/obj-new') {
+            if ($patchFails) { throw 'Authorization_RequestDenied' }
+            [void]$state.patches.Add($Body)
+            return $null
         }
         throw "fake Graph: unexpected $Method $Uri"
     }.GetNewClosure()
@@ -121,21 +126,51 @@ foreach ($k in 'passwordCredentials', 'keyCredentials', 'requiredAppRoles') {
 }
 Assert-That (($b | ConvertTo-Json -Depth 10) -notmatch 'Role') 'no application (app-only) permission anywhere in the body'
 
+# --- 5b. WAM: after the create, the broker redirect URI (it contains the appId) is PATCHed in next to http://localhost ---
+Assert-That ($g.state.patches.Count -eq 1) 'exactly one PATCH after the create'
+$pu = @($g.state.patches[0].publicClient.redirectUris)
+Assert-That ($pu.Count -eq 2 -and $pu[0] -eq 'http://localhost' -and $pu[1] -eq 'ms-appx-web://Microsoft.AAD.BrokerPlugin/55555555-5555-4555-8555-555555555555') 'the PATCH keeps http://localhost and adds ms-appx-web://Microsoft.AAD.BrokerPlugin/<appId>'
+Assert-That (@($g.state.patches[0].Keys).Count -eq 1) 'the PATCH changes only publicClient'
+Assert-That (@($g.state.calls | Where-Object { $_ -like 'PATCH *' }).Count -eq 1 -and $g.state.calls.IndexOf(($g.state.calls | Where-Object { $_ -like 'POST *' } | Select-Object -First 1)) -lt $g.state.calls.IndexOf(($g.state.calls | Where-Object { $_ -like 'PATCH *' } | Select-Object -First 1))) 'PATCH comes after POST'
+# a failing PATCH: the error says the app WAS created, with its appId, and how to finish by hand
+$g2 = New-FakeGraph -patchFails
+Assert-Throws { Register $g2 } '*WAS created*55555555-5555-4555-8555-555555555555*Authentication*' 'a failed PATCH reports the created appId and the manual step'
+
 # --- 6. -WhatIf creates nothing but returns the exact body ---
 $g = New-FakeGraph
 $r = Register $g -WhatIf
 Assert-That ($r.Status -eq 'WhatIf') '-WhatIf: status'
-Assert-That ($g.state.posts.Count -eq 0) '-WhatIf: no POST'
+Assert-That ($g.state.posts.Count -eq 0 -and $g.state.patches.Count -eq 0) '-WhatIf: no POST, no PATCH'
 Assert-That (@($g.state.calls | Where-Object { $_ -notlike 'GET *' }).Count -eq 0) '-WhatIf: only reads'
 Assert-That ($r.Body.signInAudience -eq 'AzureADMultipleOrgs' -and @($r.Body.requiredResourceAccess[0].resourceAccess).Count -eq 8) '-WhatIf returns the body that would be sent'
 
 # --- 7. the script itself: parameters ---
 $params = $ast.ParamBlock.Parameters
 $tenantParam = $params | Where-Object { $_.Name.VariablePath.UserPath -eq 'TenantId' }
-Assert-That ($null -ne $tenantParam -and $tenantParam.Attributes.Extent.Text -match 'Mandatory') '-TenantId is mandatory (no default)'
-$dom = $params | Where-Object { $_.Name.VariablePath.UserPath -eq 'ExpectedDomain' }
-Assert-That ($dom.DefaultValue.Extent.Text -eq "'veridan.eu'") "-ExpectedDomain defaults to 'veridan.eu'"
+Assert-That ($null -ne $tenantParam -and $null -eq $tenantParam.DefaultValue -and @($tenantParam.Attributes | Where-Object { $_.Extent.Text -match 'Parameter|Mandatory' }).Count -eq 0) '-TenantId has no default and no Mandatory (validated in the body: no prompt)'
+Assert-That ($null -eq ($params | Where-Object { $_.Name.VariablePath.UserPath -eq 'ExpectedDomain' })) 'the script has no -ExpectedDomain parameter (veridan.eu is fixed)'
 Assert-That ($ast.ParamBlock.Attributes.Extent.Text -match 'SupportsShouldProcess') 'the script supports -WhatIf'
+$innerFn = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Invoke-VsaRegistration' }, $false) | Select-Object -First 1
+Assert-That ($innerFn.Body.ParamBlock.Parameters.Name.VariablePath.UserPath -contains 'ExpectedDomain') 'the inner function keeps -ExpectedDomain (for the tests)'
+$srcApp = Get-Content -LiteralPath $script -Raw
+Assert-That ($srcApp -match "(?m)^\`$ExpectedDomain = 'veridan\.eu'") "the main block fixes the domain to 'veridan.eu'"
+Assert-That ($srcApp -match "-Scopes 'Application\.ReadWrite\.All', 'User\.Read'") "sign-in scopes are 'Application.ReadWrite.All', 'User.Read'"
+Assert-That ($srcApp -notmatch ('by Vas' + 'il') -and $srcApp -match 'by a Veridan administrator') 'the script says it is run by a Veridan administrator'
+
+# --- 8. a missing or malformed -TenantId: REFUSED, exit 2, before any sign-in and without a prompt (real process) ---
+$tmpDir = Join-Path ([IO.Path]::GetTempPath()) ('vsa-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory $tmpDir | Out-Null
+try {
+    # a Connect-MgGraph that must never run: if the script reached it, this stub would leave a marker file
+    $marker = Join-Path $tmpDir 'connected.txt'
+    foreach ($case in @(@{ n = 'missing'; a = '' }, @{ n = 'domain name'; a = "-TenantId 'veridan.eu'" }, @{ n = 'empty'; a = "-TenantId ''" })) {
+        $cmd = "function Connect-MgGraph { Set-Content -LiteralPath '$marker' x }; & '$script' $($case.a); exit `$LASTEXITCODE"
+        $out = & powershell -NoProfile -ExecutionPolicy Bypass -NonInteractive -Command $cmd 2>&1
+        $code = $LASTEXITCODE
+        Assert-That ($code -eq 2 -and ($out | Out-String) -match 'REFUSED') "-TenantId $($case.n): REFUSED exit 2 (got $code : $($out | Out-String))"
+        Assert-That (-not (Test-Path -LiteralPath $marker)) "-TenantId $($case.n): Connect-MgGraph was never called"
+    }
+} finally { Remove-Item -LiteralPath $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
 
 Write-Host 'ScanApp.Tests.ps1: OK'
 exit 0
