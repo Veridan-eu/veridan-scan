@@ -7,6 +7,7 @@ Set-StrictMode -Version Latest
 $repoRoot      = Split-Path -Parent $PSScriptRoot
 $realCollector = Join-Path $repoRoot 'Invoke-VeridanCollection.ps1'
 $realRelease   = Join-Path $repoRoot 'tools\release.ps1'
+$realSign      = Join-Path $repoRoot 'tools\sign.ps1'
 
 function Assert-That([bool] $cond, [string] $msg) { if (-not $cond) { throw "FAIL: $msg" } }
 
@@ -28,6 +29,7 @@ function New-Lab {
     if ($Bom) { $bytes = [byte[]]@(0xEF, 0xBB, 0xBF) + $bytes }
     [System.IO.File]::WriteAllBytes((Join-Path $work 'Invoke-VeridanCollection.ps1'), $bytes)
     Copy-Item -LiteralPath $realRelease -Destination (Join-Path $work 'tools\release.ps1')
+    Copy-Item -LiteralPath $realSign -Destination (Join-Path $work 'tools\sign.ps1')
     Set-Content -LiteralPath (Join-Path $work '.gitignore') -Value 'dist/'   # mirror the repo: dist/ is ignored
     Push-Location $work
     try {
@@ -51,13 +53,14 @@ function Add-Tag($work, $tag) {
     try { Git-Do tag $tag | Out-Null; Git-Do push -q origin $tag | Out-Null } finally { Pop-Location }
 }
 
-function Invoke-Release($work, $version) {
+function Invoke-Release($work, $version, [string[]] $extra = @()) {
     $rel = Join-Path $work 'tools\release.ps1'
-    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $rel -Version $version 2>&1
+    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $rel -Version $version @extra 2>&1
     [pscustomobject]@{ Code = $LASTEXITCODE; Out = ($out | Out-String) }
 }
 
 $labs = @()
+$testCert = $null
 try {
     # --- success ---
     $lab = New-Lab; $labs += $lab.Root
@@ -285,9 +288,56 @@ try {
     Assert-That ($gcode -eq 2 -and ($gout | Out-String) -match 'git was not found on PATH') 'refuse when git is not on PATH'
     Assert-That (-not (Test-Path -LiteralPath (Join-Path $lg.Work 'dist'))) 'no dist/ on refusal (git missing)'
 
+    # --- unsigned run: no signing wording at all (the output stays as it was before -Sign existed) ---
+    $lu = New-Lab; $labs += $lu.Root; Add-Tag $lu.Work 'v0.9.0'
+    $ru = Invoke-Release $lu.Work '0.9.0'
+    Assert-That ($ru.Code -eq 0 -and $ru.Out -notmatch 'Authenticode' -and $ru.Out -notmatch 'signed') 'unsigned run prints nothing about signing'
+
+    # --- -Sign: stamp -> sign -> SHA256SUMS over the SIGNED bytes (test certificate, no Azure) ---
+    $testCert = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Veridan Release Test' -CertStoreLocation 'Cert:\CurrentUser\My'
+    $thumb = $testCert.Thumbprint
+    $ls1 = New-Lab; $labs += $ls1.Root; Add-Tag $ls1.Work 'v0.9.0'
+    $rs = Invoke-Release $ls1.Work '0.9.0' @('-Sign', '-TestCertificateThumbprint', $thumb)
+    Assert-That ($rs.Code -eq 0) "-Sign (test certificate) exits 0 (got $($rs.Code): $($rs.Out))"
+    $sd = Join-Path $ls1.Work 'dist\Invoke-VeridanCollection.ps1'
+    $sig = Get-AuthenticodeSignature -LiteralPath $sd
+    Assert-That ($null -ne $sig.SignerCertificate -and $sig.SignerCertificate.Thumbprint -eq $thumb) 'dist collector carries the test signature'
+    Assert-That ($sig.Status -in 'Valid', 'UnknownError') "signature status is intact, not HashMismatch (got $($sig.Status))"
+    $sBytes = [System.IO.File]::ReadAllBytes($sd)
+    $headS  = ((Git-Do -C $ls1.Work rev-parse HEAD) | Out-String).Trim()
+    $stampedExpected = [System.Text.Encoding]::UTF8.GetBytes(([System.Text.Encoding]::UTF8.GetString([System.IO.File]::ReadAllBytes((Join-Path $ls1.Work 'Invoke-VeridanCollection.ps1')))).Replace("`$COLLECTOR_COMMIT = 'dev'", "`$COLLECTOR_COMMIT = '$headS'"))
+    $same = $true
+    for ($i = 0; $i -lt $stampedExpected.Length; $i++) { if ($sBytes[$i] -ne $stampedExpected[$i]) { $same = $false; break } }
+    Assert-That ($same -and $sBytes.Length -gt $stampedExpected.Length) 'the signed file starts with the stamped bytes, signature block appended'
+    $sHash = (Get-FileHash -LiteralPath $sd -Algorithm SHA256).Hash.ToLower()
+    $sSums = Get-Content -LiteralPath (Join-Path $ls1.Work 'dist\SHA256SUMS') -Raw
+    Assert-That ($sSums.Trim() -eq "$sHash  Invoke-VeridanCollection.ps1") 'SHA256SUMS is over the signed bytes'
+    Assert-That ($rs.Out -match [regex]::Escape('Get-AuthenticodeSignature .\Invoke-VeridanCollection.ps1 | Format-List Status, SignerCertificate, TimeStamperCertificate')) 'publish hint shows how a user checks the signature'
+    Assert-That ($rs.Out -match 'signed') 'publish hint says the file is signed'
+
+    # --- -Sign refusals: bad switch combinations are refused before dist\ is written ---
+    $lr = New-Lab; $labs += $lr.Root; Add-Tag $lr.Work 'v0.9.0'
+    $x = Invoke-Release $lr.Work '0.9.0' @('-Sign')
+    Assert-That ($x.Code -eq 2 -and $x.Out -match 'REFUSED' -and $x.Out -match 'MetadataPath') '-Sign alone is refused'
+    Assert-That (-not (Test-Path -LiteralPath (Join-Path $lr.Work 'dist'))) 'no dist/ on refusal (-Sign alone)'
+    $x = Invoke-Release $lr.Work '0.9.0' @('-TestCertificateThumbprint', $thumb)
+    Assert-That ($x.Code -eq 2 -and $x.Out -match 'only with -Sign') '-TestCertificateThumbprint without -Sign is refused'
+    $x = Invoke-Release $lr.Work '0.9.0' @('-MetadataPath', 'x.json')
+    Assert-That ($x.Code -eq 2 -and $x.Out -match 'only with -Sign') '-MetadataPath without -Sign is refused'
+    $x = Invoke-Release $lr.Work '0.9.0' @('-Sign', '-TestCertificateThumbprint', $thumb, '-MetadataPath', 'x.json')
+    Assert-That ($x.Code -eq 2 -and $x.Out -match 'not both') 'test certificate and metadata together are refused'
+    Assert-That (-not (Test-Path -LiteralPath (Join-Path $lr.Work 'dist'))) 'no dist/ on refusal (switch combinations)'
+
+    # --- signing fails (unknown thumbprint): REFUSED, and no unsigned collector or SHA256SUMS is left behind ---
+    $x = Invoke-Release $lr.Work '0.9.0' @('-Sign', '-TestCertificateThumbprint', ('0' * 40))
+    Assert-That ($x.Code -eq 2 -and $x.Out -match 'REFUSED' -and $x.Out -match 'signing failed') "a failed signing is refused (got $($x.Code): $($x.Out))"
+    Assert-That (-not (Test-Path -LiteralPath (Join-Path $lr.Work 'dist\Invoke-VeridanCollection.ps1'))) 'no unsigned collector left in dist\ after a failed signing'
+    Assert-That (-not (Test-Path -LiteralPath (Join-Path $lr.Work 'dist\SHA256SUMS'))) 'no SHA256SUMS left after a failed signing'
+
     Write-Host 'Release.Tests.ps1: OK'
     exit 0
 }
 finally {
+    if ($testCert) { Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($testCert.Thumbprint)" -Force -ErrorAction SilentlyContinue }
     foreach ($d in $labs) { Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue }
 }
